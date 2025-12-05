@@ -4,21 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "0d2574c7343bcae9",
+        "id": "46c8410949fc79e7",
         "type": "tabs",
         "children": [
           {
-            "id": "ffcdf679af52f9b3",
+            "id": "93a60cd00e090956",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Fundamental/Transformers/Attention.md",
+                "file": "Fundamental/Transformers/Transformer.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Attention"
+              "title": "Transformer"
             }
           }
         ]
@@ -94,7 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "Fundamental/Transformers/Attention.md",
+                "file": "Fundamental/Transformers/Transformer.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Attention 的反向链接列表"
+              "title": "Transformer 的反向链接列表"
             }
           },
           {
@@ -113,12 +113,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "Fundamental/Transformers/Attention.md",
+                "file": "Fundamental/Transformers/Transformer.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Attention 的出链列表"
+              "title": "Transformer 的出链列表"
             }
           },
           {
@@ -156,21 +156,21 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "Fundamental/Transformers/Attention.md",
+                "file": "Fundamental/Transformers/Transformer.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Attention 的大纲"
+              "title": "Transformer 的大纲"
             }
           }
-        ]
+        ],
+        "currentTab": 4
       }
     ],
     "direction": "horizontal",
-    "width": 300,
-    "collapsed": true
+    "width": 300
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -184,10 +184,17 @@
       "markdown-importer:打开 Markdown 格式转换器": false
     }
   },
-  "active": "ffcdf679af52f9b3",
+  "active": "93a60cd00e090956",
   "lastOpenFiles": [
+    "Fundamental/Transformers/RNN.md",
+    "Fundamental/Transformers/Transformer.md",
+    "Fundamental/Transformers/Tokenizer.md",
+    "Fundamental/Transformers/paper/Attention is All You Need.pdf",
+    "Fundamental/Transformers/paper",
+    "Fundamental/Transformers/img/Attention in RNN.png",
+    "Fundamental/Transformers/img",
+    "Fundamental/Transformers/paper/NEURAL MACHINE TRANSLATION BY JOINTLY LEARNING TO ALIGN AND TRANSLATE.pdf",
     "Fundamental/未命名.md",
-    "Fundamental/Transformers/Attention.md",
     "Fundamental/Transformers",
     "Distribute Training/Papers.md",
     "Fundamental",
@@ -198,10 +205,6 @@
     "Inference/未命名.canvas",
     "Inference/Optimization",
     "Inference/Scheduling&Batching",
-    "Inference/KV Cache",
-    "Inference",
-    "Distribute Training/Communication Primitives",
-    "Distribute Training/Memory Optimization",
-    "Kernels&Compilers/Kernels"
+    "Inference/KV Cache"
   ]
 }
