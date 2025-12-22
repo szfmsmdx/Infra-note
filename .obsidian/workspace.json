@@ -182,25 +182,25 @@
   "active": "6cce3b484b53a344",
   "lastOpenFiles": [
     "Todo List.md",
+    "Fundamental/Transformers/paper/paper list.md",
+    "Fundamental/Transformers/img/Attention in RNN.png",
+    "Fundamental/Transformers/paper",
+    "Fundamental/Transformers/img",
     "Fundamental/Transformers/Transformer.md",
     "Fundamental/Transformers/Tokenizer.md",
     "Fundamental/Transformers/RNN.md",
-    "Fundamental/Transformers/paper/paper list.md",
+    "Fundamental/Transformers",
+    "Fundamental",
+    "test.py",
     "Fundamental/Transformers/paper/NEURAL MACHINE TRANSLATION BY JOINTLY LEARNING TO ALIGN AND TRANSLATE.pdf",
     "Fundamental/Transformers/paper/Attention is All You Need.pdf",
-    "Fundamental/Transformers/paper",
-    "Fundamental/Transformers/img/Attention in RNN.png",
-    "Fundamental/Transformers/img",
     "Fundamental/未命名.md",
-    "Fundamental/Transformers",
     "Distribute Training/Papers.md",
-    "Fundamental",
     "2025-12-03.md",
     "未命名.canvas",
     "未命名.base",
     "Inference/未命名.canvas",
     "Inference/Optimization",
-    "Inference/Scheduling&Batching",
-    "Inference/KV Cache"
+    "Inference/Scheduling&Batching"
   ]
 }
