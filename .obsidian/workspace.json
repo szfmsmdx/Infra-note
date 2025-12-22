@@ -4,21 +4,17 @@
     "type": "split",
     "children": [
       {
-        "id": "46c8410949fc79e7",
+        "id": "ccb7720bc6773391",
         "type": "tabs",
         "children": [
           {
-            "id": "93a60cd00e090956",
+            "id": "6cce3b484b53a344",
             "type": "leaf",
             "state": {
-              "type": "markdown",
-              "state": {
-                "file": "Fundamental/Transformers/Transformer.md",
-                "mode": "source",
-                "source": false
-              },
+              "type": "empty",
+              "state": {},
               "icon": "lucide-file",
-              "title": "Transformer"
+              "title": "新标签页"
             }
           }
         ]
@@ -156,13 +152,12 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "Fundamental/Transformers/Transformer.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Transformer 的大纲"
+              "title": "大纲"
             }
           }
         ],
@@ -184,21 +179,22 @@
       "markdown-importer:打开 Markdown 格式转换器": false
     }
   },
-  "active": "93a60cd00e090956",
+  "active": "6cce3b484b53a344",
   "lastOpenFiles": [
-    "Fundamental/Transformers/RNN.md",
+    "Todo List.md",
     "Fundamental/Transformers/Transformer.md",
     "Fundamental/Transformers/Tokenizer.md",
+    "Fundamental/Transformers/RNN.md",
+    "Fundamental/Transformers/paper/paper list.md",
+    "Fundamental/Transformers/paper/NEURAL MACHINE TRANSLATION BY JOINTLY LEARNING TO ALIGN AND TRANSLATE.pdf",
     "Fundamental/Transformers/paper/Attention is All You Need.pdf",
     "Fundamental/Transformers/paper",
     "Fundamental/Transformers/img/Attention in RNN.png",
     "Fundamental/Transformers/img",
-    "Fundamental/Transformers/paper/NEURAL MACHINE TRANSLATION BY JOINTLY LEARNING TO ALIGN AND TRANSLATE.pdf",
     "Fundamental/未命名.md",
     "Fundamental/Transformers",
     "Distribute Training/Papers.md",
     "Fundamental",
-    "Todo List.md",
     "2025-12-03.md",
     "未命名.canvas",
     "未命名.base",
