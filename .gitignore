@@ -1,4 +1,14 @@
-*.DS_Store*
-*.obsidian/workspace.json*
-*.obsidian/workspaces.json*
-*.obsidian/appearance.json*
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Obsidian
+.obsidian/
+
+# Editors
+.vscode/
+.idea/
+
+# pycache
+**/__pycache__
