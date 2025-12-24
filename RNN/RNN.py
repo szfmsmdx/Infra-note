@@ -113,10 +113,11 @@ if __name__ == "__main__":
         input_dim=embed_dim,
         hidden_dim=hidden_dim,
         pad_idx=tokenizer.pad_id,
-        eos_idx=tokenizer.eos_id
+        eos_idx=tokenizer.eos_id,
+        device="cuda"
     )
-
-    input_idx = tokenizer.encode(sentences)
-    new_token = rnn.generate(input_idx)
+    print(rnn)
+    input_idx = tokenizer.encode(sentences).to("cuda")
+    new_token = rnn.generate(input_idx).to("cuda")
     generate = tokenizer.decode(new_token)
     print(generate)

@@ -32,40 +32,38 @@ def train():
         device=device
     ).to(input_ids.device)
 
-    optimizer = Adam(model.parameters(), lr=1e-2)
     criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_id)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
 
     model.train()
-    num_epochs = 50
+    num_epochs = 300
 
     for epoch in range(num_epochs):
-        x = input_ids[:, :-1]   # [B, T-1]
-        y = input_ids[:, 1:]    # [B, T-1]
+        x = input_ids[:, :-1]    # x : [B, T-1]
+        y = input_ids[:, 1:]    # y : [B, T-1]
 
-        logits = model(x)       # [B, T-1, vocab]
-        B, T, V = logits.shape
-
+        logits = model(x)       # logits : [B, T-1, vocab_size]
+        B, T, V =  logits.shape
         loss = criterion(
-            logits.reshape(B * T, V),
-            y.reshape(B * T)
+            logits.reshape(B * T, V), y.reshape(B * T) 
         )
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        if epoch % 10 == 0 or epoch == num_epochs - 1:
+        if epoch % 10 == 0 or epoch == -1:
             print(f"Epoch {epoch:03d} | Loss: {loss.item():.4f}")
 
+    # 验证推理
     model.eval()
     with torch.no_grad():
-        test_input = tokenizer.encode(["你好"])
-        test_input = test_input.to(input_ids.device)
+        test_text = "我喜欢"
+        test_input = tokenizer.encode([test_text]).to(device)
+        gen_idx = model.generate(test_input, max_new_token=10)
+        gen_text = tokenizer.decode(gen_idx)
 
-        gen_ids = model.generate(test_input, max_new_token=10)
-        gen_text = tokenizer.decode(gen_ids)
-
-        print("Prompt: 你好")
+        print(f"Prompt: {test_text}")
         print("Generate:", gen_text)
 
 
