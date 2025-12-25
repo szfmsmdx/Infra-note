@@ -40,7 +40,6 @@ Attention最早提出追溯到[这篇论文](https://arxiv.org/pdf/1409.0473)
 - FC 层是所有时间步、所有上下文共用的投影层
 
 ## History
-<<<<<<< HEAD
 
 ### 核心发展论文
 
@@ -58,22 +57,17 @@ Attention最早提出追溯到[这篇论文](https://arxiv.org/pdf/1409.0473)
     - 将 **自注意力机制作为核心构建块** 构造全 attention 序列模型（Transformer）。此论文奠定了现代 LLM 框架。[维基百科](https://en.wikipedia.org/wiki/Attention_Is_All_You_Need?utm_source=chatgpt.com)
 
 
-=======
->>>>>>> 4ac15f836270332ae29007be82c7cc4d5dec6761
 ### Self-Attention
 
 
 ### Hard Attention
 
-<<<<<<< HEAD
 
 ### Global vs Local Attention
 
 
-=======
 ### Global vs Local Attention
 
->>>>>>> 4ac15f836270332ae29007be82c7cc4d5dec6761
 ## Transformers
 Attention被发扬光大实际上是著名的 [Attention is All You Need]([Attention is All you Need](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf)) 这篇论文的影响
 Transformer 是目前第一个只使用自注意力机制的模型
