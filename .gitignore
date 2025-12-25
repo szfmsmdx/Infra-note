@@ -1,4 +1,7 @@
+<<<<<<< HEAD
+=======
 
+>>>>>>> 4ac15f836270332ae29007be82c7cc4d5dec6761
 # macOS
 .DS_Store
 **/.DS_Store
@@ -10,5 +13,8 @@
 .vscode/
 .idea/
 
+<<<<<<< HEAD
+=======
 # pycache
 **/__pycache__
+>>>>>>> 4ac15f836270332ae29007be82c7cc4d5dec6761
