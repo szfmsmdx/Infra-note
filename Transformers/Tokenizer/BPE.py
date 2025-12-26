@@ -1,123 +1,224 @@
 # BPE toy tokenizer
-import torch
 import pickle
 from collections import OrderedDict, defaultdict
 from tqdm import tqdm
+import re
+from functools import lru_cache
+
+SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\w+| ?[^\s\w]+|\s+(?!\S)|\s+"""
 
 class BPE_Tokenizer():
-    def __init__(self, vocab_size):
+    def __init__(self, vocab_size=2000):
         super().__init__()
         self.vocab_size = vocab_size
         self.token2id = OrderedDict()
         self.id2token = OrderedDict()
-        self.merges = []
+        self.merges = []    # ((id, id), id)
+        self.merges_rank = {}   # ((id, id), rank) 越小
+        self.special_tokens = {}
 
-    def _pair_stats(self, tokens: list[str], stats: dict[tuple[str, str], int]):
-        """维护 state : pair count 计数对"""
-        for i in range(len(tokens) - 1):
-            pair = (tokens[i], tokens[i + 1])
-            stats[pair] = stats.get(pair, 0) + 1
+    def _pre_tokenize(self, text : str):
+        """
+        预先将 text 分词为 word level
+        """
+        return re.findall(SPLIT_PATTERN, text)
+    
+    def _get_stats(self, word_counts : dict[tuple[int], str]):
+        """stats : (pair, int)"""
+        stats = defaultdict(int)      
+        for word_byte in word_counts:
+            count = word_counts[word_byte]
+            for i in range(len(word_byte) - 1):
+                pair = word_byte[i], word_byte[i + 1]   # pair 是 (int, int)
+                stats[pair] += count
         return stats
-    
-    def _merge(self, tokens_list: list[list[str]]):
-        """
-        维护 self.merge : [token, token] token 合并规则
-        返回
-            new_token : 合并后的 token 
-            new_token_list : token_list 经过 merge 规则合并后的 token
-        """
-        stats = {}
-        for tokens in tokens_list:
-            self._pair_stats(tokens, stats)
-        
-        if not stats:
-            return None, tokens_list
 
+    def _merge_token(self, word_count : dict[tuple[int], int], stats):
+        """
+        word_count : byte level dict
+        """
         target_pair = max(stats, key=stats.get)
+        new_token = self.id2token[target_pair[0]] + self.id2token[target_pair[1]]
+        new_token_idx = len(self.id2token)
+        rank = len(self.merges_rank)
 
-        new_token = target_pair[0] + target_pair[1]
-        self.merges.append(target_pair)
+        # 更新词表
+        self.id2token[new_token_idx] = new_token
+        self.token2id[new_token] = new_token_idx
+        self.merges.append((target_pair, new_token_idx))
+        self.merges_rank[target_pair] = rank
+        del stats[target_pair]
 
-        new_token_list = []
-        for tokens in tokens_list:
-            merged_token = []
+        # 更新计数器
+        new_word_count = defaultdict(int)
+        for word_idx, count in word_count.items():
+            # 修改 word_idx 中 target_pair 部分
+            if target_pair[0] not in word_idx:
+                new_word_count[word_idx] = count    # 用原来的
+                continue
+
+            new_word_idx = []
             i = 0
-            while i < len(tokens):
-                if i + 1 < len(tokens) and (tokens[i], tokens[i + 1]) == target_pair:
-                    merged_token.append(new_token)
+            while i < len(word_idx):
+                if i + 1 < len(word_idx) and (word_idx[i], word_idx[i + 1]) == target_pair:
+                    if new_word_idx:    # 删左边
+                        left_token_idx = new_word_idx[-1]
+                        stats[(left_token_idx, word_idx[i])] -= count
+                        if stats[(left_token_idx, word_idx[i])] == 0:   # 如果是 0 则删除防止内存泄漏
+                            del stats[(left_token_idx, word_idx[i])]
+                        stats[(left_token_idx, new_token_idx)] += count
+                    if i + 2 < len(word_idx):
+                        right_token_idx = word_idx[i + 2]
+                        stats[(target_pair[1], right_token_idx)] -=count
+                        if stats[(target_pair[1], right_token_idx)] == 0:
+                            del stats[(target_pair[1], right_token_idx)]
+                        stats[new_token_idx, right_token_idx] += count
+                    new_word_idx.append(new_token_idx)
                     i += 2
                 else:
-                    merged_token.append(tokens[i])
+                    new_word_idx.append(word_idx[i])
                     i += 1
-            new_token_list.append(merged_token)
 
-        return new_token, new_token_list
-    
-    def _build_vocab(self, tokens_list:list[list[str]]):
-        """
-        根据收敛的 tokens_list 构建 vocab
-        """
-        vocab = set(tok for tokens in tokens_list for tok in tokens)
-        for i, token in enumerate(sorted(vocab)):
-            self.id2token[i] = token
-            self.token2id[token] = i
+            new_word_count[tuple(new_word_idx)] = count
+
+        return new_word_count, stats
+
+    def train(self, trian_text : list[str]):
+        # word_count[word_idx : tuple[int], count : int]
+        self.merges.clear()
+        self.merges_rank.clear()
+        self._encode_word.cache_clear()
         
-    def encode(self, text:str):
-        """
-        输入 text : str
-        输出 idx
-        """
-        # 这里注意，因为我们的 merge 是按照最大频率的次序慢慢添加的所以greedy版本自然按照贪心实现
-        tokens = list(text)
-        for a, b in self.merges:
-            merged_token = []
-            i = 0
-            while i < len(tokens):
-                if i + 1 < len(tokens) and tokens[i] == a and tokens[i + 1] == b:
-                    merged_token.append(a+b)
-                    i += 2
-                else:
-                    merged_token.append(tokens[i])
-                    i += 1
+        word_count = defaultdict(int)
+        for text in trian_text:
+            words = self._pre_tokenize(text)
+            for word in words:
+                word_idx = tuple(word.encode("utf-8"))    # encode 完是id!!!
+                word_count[word_idx] += 1
 
-            tokens = merged_token
-        return [self.token2id[t] for t in tokens]
-    
-    def decode(self, ids:list[int]):
-        """ idx to text """
-        tokens = [self.id2token[i] for i in ids]
-        return "".join(tokens)
-    
-    def train(self, train_texts:list[str]):
-        """
-        合并更新 vocab
-        """
-        tokens_list = [list(text) for text in train_texts]
-        # 给一个小一点的初始化否则小 vocab_size 设置会直接短路
-        vocab = set()
+        # 初始化词表, 因为 word byte 的范围是 0-255，所以我们直接用 0-255 进行初始化
+        for i in range(256):
+            self.id2token[i] = bytes([i])
+            self.token2id[bytes([i])] = i
 
-        for _ in tqdm(range(self.vocab_size)):  # 这是轮数，最终 vocab_size是 build vocab实现的
-            new_token, tokens_list = self._merge(tokens_list)
-            if new_token is None:
+        # merge
+        stats = self._get_stats(word_count)
+        for _ in tqdm(range(self.vocab_size - len(self.token2id))):
+            word_count, stats = self._merge_token(word_count, stats)
+
+    @lru_cache(maxsize=10000)
+    def _encode_word(self, word_ids : tuple[int]):
+        word_ids = list(word_ids)
+        while len(word_ids) >= 2:   # 说明可能可以合并
+            stats = {}
+            for i in range(len(word_ids) - 1):
+                pair = (word_ids[i], word_ids[i + 1])
+                if pair in self.merges_rank:
+                    stats[pair] = self.merges_rank[pair]
+
+            if not stats:
                 break
-            vocab.add(new_token)
 
-        self._build_vocab(tokens_list)
+            pair_to_merge = min(stats, key=stats.get)   # 越小优先级越高
+            rank = self.merges_rank[pair_to_merge]  # 空间换时间，不用继续遍历原表格
+            new_id = self.merges[rank][1]
+
+            # 替换
+            new_ids = []
+            i = 0
+            while i < len(word_ids):
+                if i < len(word_ids) - 1 and (word_ids[i], word_ids[i + 1]) == pair_to_merge:
+                    new_ids.append(new_id)
+                    i += 2 
+                else:
+                    new_ids.append(word_ids[i])
+                    i += 1
+            word_ids = new_ids
+
+        return tuple(word_ids)  # 转成原格式 tuple
+
+    def encode(self, text: str, add_special_tokens=True):
+        res = []
+        words_list = self._pre_tokenize(text)
+        for word in words_list:
+            word_ids = tuple(word.encode("utf-8"))
+            res.extend(self._encode_word(word_ids))
+        
+        if add_special_tokens:
+            if "[CLS]" in self.special_tokens:
+                res = [self.special_tokens["[CLS]"]] + res
+            elif "<bos>" in self.special_tokens:
+                res = [self.special_tokens["<bos>"]] + res
+                
+            if "[SEP]" in self.special_tokens:
+                res.append(self.special_tokens["[SEP]"])
+            elif "<eos>" in self.special_tokens:
+                res.append(self.special_tokens["<eos>"])
+                
+        return res
+    def decode(self, ids: list[int], skip_special_tokens=True):
+        byte_list = b""
+        decoded_text = ""
+        for i in ids:
+            if i in self.id2token:
+                token = self.id2token[i]
+                if isinstance(token, bytes):
+                    byte_list += token
+                elif isinstance(token, str):    # 说明是特殊字符
+                    if not skip_special_tokens:
+                        decoded_text += byte_list.decode("utf-8", errors='replace')
+                        byte_list = b"" # 清空缓冲区
+                        decoded_text += token
+                    else:
+                        pass
+                        
+        decoded_text += byte_list.decode("utf-8", errors='replace')
+        return decoded_text
 
     def save(self, save_path):
         with open(save_path, "wb") as f:
-            pickle.dump((self.token2id, self.id2token, self.merges, self.vocab_size), f)
+            pickle.dump((self.token2id, self.id2token, self.merges, self.vocab_size, self.special_tokens), f)
 
     def load(self, save_path):
         with open(save_path, "rb") as f:
-            self.token2id, self.id2token, self.merges, self.vocab_size = pickle.load(f)
+            data = pickle.load(f)
+            if len(data) == 5:
+                self.token2id, self.id2token, self.merges, self.vocab_size, self.special_tokens = data
+            else:
+                self.token2id, self.id2token, self.merges, self.vocab_size = data
+                self.special_tokens = {}
+        for i, (pair, new_id) in enumerate(self.merges):
+            self.merges_rank[pair] = i
+
+        self._encode_word.cache_clear()
+
+    def add_special_token(self, tokens : list[str]):
+        for token in tokens:
+            if token not in self.special_tokens and token not in self.token2id:
+                new_id = len(self.id2token)
+                self.special_tokens[token] = new_id
+                self.id2token[new_id] = token 
+                self.token2id[token] = new_id
 
 if __name__ == "__main__":
-    cn = open("/data3/szf/Infra-note/Transformers/Tokenizer/data/train-cn.txt", 'r', encoding='utf-8').read()
-    en = open("/data3/szf/Infra-note/Transformers/Tokenizer/data/train-en.txt", 'r', encoding='utf-8').read()
+    # cn = open("./data/train-cn.txt", 'r', encoding='utf-8').read()
+    # en = open("./data/train-en.txt", 'r', encoding='utf-8').read()
 
-    tokenizer = BPE_Tokenizer(vocab_size=200)
+    tokenizer = BPE_Tokenizer()
     
-    tokenizer.train([cn, en])
-    print(tokenizer.token2id)
-    print(len(tokenizer.token2id))
+    # tokenizer.train([cn, en])
+    # print(tokenizer.token2id)
+    # print(len(tokenizer.token2id))
+
+    # tokenizer.save("./tokenizer.pt")
+    tokenizer.load("./tokenizer.pt")
+    print(tokenizer.vocab_size)
+
+    prompt = "今天天气真不错！"
+    encode_idx = tokenizer.encode(prompt)
+    print(prompt, encode_idx)
+    decode_text = tokenizer.decode(encode_idx)
+    print(prompt, "------ after decode:", decode_text)
+
+    tokenizer.add_special_token(["<pad>", "<eos>"])
+    print(f"Encode T5 style: {tokenizer.encode('今天')}") # output: [..., <eos>_id]
