@@ -208,7 +208,7 @@ if __name__ == "__main__":
     
     # tokenizer.train([cn, en])
     # print(tokenizer.token2id)
-    # print(len(tokenizer.token2id))
+    print(len(tokenizer.token2id))
 
     # tokenizer.save("./tokenizer.pt")
     tokenizer.load("./tokenizer.pt")
