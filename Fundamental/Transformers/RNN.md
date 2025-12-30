@@ -2,7 +2,7 @@
 
 #### 1. 基础架构与数学
 
-- **Vanilla RNN**：$h_t = \tanh(W h_{t-1} + U x_t)$。
+- **Vanilla RNN**：$h_t = \tanh(W h_{t-1} + U x_t)$ 。
 - **BPTT (Backpropagation Through Time)**：随时间反向传播的推导，理解梯度如何在时间步中流动。
 - **梯度消失/爆炸 (Vanishing/Exploding Gradient)**：
     - _数学本质_：连乘效应（雅可比矩阵的特征值是否大于 1）。
