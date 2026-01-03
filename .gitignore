@@ -11,3 +11,5 @@
 
 # pycache
 **/__pycache__
+
+**/checkpoints

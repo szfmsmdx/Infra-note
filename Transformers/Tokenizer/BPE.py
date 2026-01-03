@@ -145,15 +145,16 @@ class BPE_Tokenizer():
             res.extend(self._encode_word(word_ids))
         
         if add_special_tokens:
-            if "[CLS]" in self.special_tokens:
-                res = [self.special_tokens["[CLS]"]] + res
-            elif "<bos>" in self.special_tokens:
-                res = [self.special_tokens["<bos>"]] + res
+            # 更加通用的 Special Token 注入逻辑
+            bos_id = self.special_tokens.get("<bos>") or self.special_tokens.get("[CLS]")
+            eos_id = self.special_tokens.get("<eos>") or self.special_tokens.get("[SEP]")
+            
+            if bos_id is not None:
+                res = [bos_id] + res
+            if eos_id is not None:
+                res.append(eos_id)
                 
-            if "[SEP]" in self.special_tokens:
-                res.append(self.special_tokens["[SEP]"])
-            elif "<eos>" in self.special_tokens:
-                res.append(self.special_tokens["<eos>"])
+        return res
                 
         return res
     def decode(self, ids: list[int], skip_special_tokens=True):

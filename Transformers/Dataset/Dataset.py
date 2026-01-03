@@ -15,7 +15,7 @@ if project_root not in sys.path:
 from Tokenizer.BPE import BPE_Tokenizer
 
 
-def t5_span_corruption(input_ids: list[int], tokenizer: BPE_Tokenizer, noisy_density=0.15):
+def t5_span_corruption(input_ids: list[int], tokenizer: BPE_Tokenizer, noisy_density=0.05):
     """
     返回:
         source_ids: list[int] (带哨兵的输入)
@@ -98,19 +98,24 @@ class T5Datasets(Dataset):
             "labels": torch.tensor(target_ids, dtype=torch.long)  # 注意：你原写的是 "lables"，应为 "labels"
         }
 
-def t5_collect_fn(batch, pad_id=0):
+def t5_collect_fn(batch, pad_id=0, decoder_start_id=2):
     input_ids = [item["input_ids"] for item in batch]
     labels = [item["labels"] for item in batch]
 
-    # batch_first 的作用是让形状保持为 (Batch_Size, Seq_Len)
-    input_pad = pad_sequence(input_ids, True, pad_id)     
-    label_pad = pad_sequence(labels, True, pad_id)
+    input_pad = pad_sequence(input_ids, batch_first=True, padding_value=pad_id)
+    label_pad = pad_sequence(labels, batch_first=True, padding_value=pad_id)
+
+    batch_size = label_pad.size(0)
+    starts = torch.full((batch_size, 1), decoder_start_id, dtype=torch.long)
+    decoder_input_ids = torch.cat([starts, label_pad[:, :-1]], dim=1)
 
     attention_mask = (input_pad != pad_id).long()
+    
     return {
-        "input_ids" : input_pad,
-        "labels" : label_pad,
-        "attention_mask" : attention_mask
+        "input_ids": input_pad,
+        "decoder_input_ids": decoder_input_ids,
+        "labels": label_pad,
+        "attention_mask": attention_mask
     }
 
 
@@ -145,7 +150,6 @@ if __name__ == "__main__":
     dataset = T5Datasets(file_list=test_file, tokenizer=tokenizer, max_length=128)
     print(f"\nDataset size: {len(dataset)}")
 
-    # --- 4. 实例化 DataLoader (核心测试点) ---
     # 使用 partial 把 pad_id 传入 collate_fn
     loader = DataLoader(
         dataset, 

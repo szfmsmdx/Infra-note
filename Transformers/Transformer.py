@@ -1,6 +1,7 @@
 import torch
 from torch.nn.modules.transformer import Transformer
 from math import sqrt, log
+from Config import T5Config
 
 def casual_mask(seq_len: int):
     mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
@@ -172,12 +173,24 @@ class Encoder(torch.nn.Module):
         self.norm = RMS_Norm(self.model_dim)
         self.position_embed = T5PositionEmbedding(self.num_head, 32, max_distance=int(2 ** 10))
 
-    def forward(self, input_ids):
-        """input_ids : [B, L]"""
-        position_embedding = self.position_embed(input_ids.size(1))
+    def forward(self, input_ids, attention_mask=None):
+        """
+        input_ids: [B, L]
+        attention_mask: [B, L] (1 代表有效, 0 代表 padding)
+        """
+        batch_size, seq_len = input_ids.shape
+        
+        if attention_mask is not None:
+            extended_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            extended_mask = (1.0 - extended_mask) * -1e9
+        else:
+            extended_mask = 0
+
+        position_embedding = self.position_embed(seq_len)
         x = self.embedding(input_ids)
+        
         for layer in self.encode_layers:
-            x = layer(x, position_embedding)
+            x = layer(x, position_embed=position_embedding + extended_mask)
         x = self.norm(x)
         return x
 
@@ -215,7 +228,7 @@ class Cross_Attention(torch.nn.Module):
         if position_embedding is not None:
             attn_score += position_embedding
         if mask is not None:
-            mask = mask.view(1, 1, mask.size(-2), mask.size(-1))
+            mask = mask.view(1, 1, mask.size(-2), mask.size(-1)).to(x.device)
             attn_score += mask
         score = torch.softmax(attn_score, dim=-1).matmul(v)
 
@@ -282,60 +295,48 @@ class Decoder(torch.nn.Module):
         x = self.norm(x)
         return x
 
-if __name__ == "__main__":
-    torch.manual_seed(42)
-    
-    # 全局超参数
-    V_SIZE = 100
-    D_MOD = 32
-    N_LAY = 2
-    N_H = 4
-    D_FF = 128
-    
-    print("--- [总攻测试] 启动 T5 Encoder-Decoder 联合演习 ---")
-    
-    # 实例化双子星
-    encoder = Encoder(num_layers=N_LAY, vocab_size=V_SIZE, model_dim=D_MOD, num_head=N_H, ffn_dim=D_FF)
-    decoder = Decoder(num_layers=N_LAY, vocab_size=V_SIZE, model_dim=D_MOD, num_head=N_H, ffn_dim=D_FF)
-    
-    # 模拟数据
-    src_ids = torch.randint(0, V_SIZE, (1, 10)) # 源语言长度 10
-    tgt_ids = torch.randint(0, V_SIZE, (1, 5))  # 目标语言长度 5
-    
-    encoder.eval()
-    decoder.eval()
-    
-    try:
-        # 第一步：Encoder 编码
-        with torch.no_grad():
-            memory = encoder(src_ids)
-            print(f"1. Encoder 完工，特征形状: {memory.shape}") # [1, 10, 32]
-            
-            # 第二步：Decoder 解码
-            output = decoder(tgt_ids, memory)
-            print(f"2. Decoder 完工，输出形状: {output.shape}") # [1, 5, 32]
-            
-        if output.shape == (1, 5, D_MOD):
-            print("\n✅ 全链路形状匹配成功！")
-        else:
-            print(f"❌ 形状异常: {output.shape}")
-            
-    except Exception as e:
-        print(f"❌ 运行崩溃，报错信息: {e}")
+class Model(torch.nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.encoder = Encoder(config.num_layers, config.vocab_size, config.model_dim, 
+                               config.num_head, config.ffn_dim, config.dropout_rate)
+        self.decoder = Decoder(config.num_layers, config.vocab_size, config.model_dim, 
+                               config.num_head, config.ffn_dim, config.dropout_rate)
+        self.lm_head = torch.nn.Linear(config.model_dim, config.vocab_size, bias=False)
+        self.lm_head.weight = self.decoder.embedding.weight
 
-    # 验证 Decoder 的独立性（再次检查掩码）
-    print("\n--- [终极验证] Decoder 跨序列干扰检查 ---")
-    with torch.no_grad():
-        # 修改 tgt_ids 的最后一个词
-        tgt_ids_mod = tgt_ids.clone()
-        tgt_ids_mod[0, -1] = (tgt_ids[0, -1] + 1) % V_SIZE
+    def forward(self, source_ids, target_ids):
+        attention_mask = (source_ids != self.config.pad_token_id).long()
         
-        out1 = decoder(tgt_ids, memory)
-        out2 = decoder(tgt_ids_mod, memory)
+        memory = self.encoder(source_ids, attention_mask=attention_mask)
+        decoder_output = self.decoder(target_ids, memory)
+        logits = self.lm_head(decoder_output)
+        return logits
+
+    def generate(self, source_ids, max_new_token=50):
+        batch_size = source_ids.size(0)
+        device = source_ids.device
         
-        # 前 4 个词的输出不应受第 5 个词的影响
-        diff = (out1[:, :-1, :] - out2[:, :-1, :]).abs().max().item()
-        if diff < 1e-6:
-            print(f"✅ 完美！Decoder 在多层嵌套下依然保持因果性 (Diff: {diff:.2e})")
-        else:
-            print(f"❌ 警告：多层堆叠导致因果泄露！Diff: {diff:.4f}")
+        attention_mask = (source_ids != self.config.pad_token_id).long()
+        memory = self.encoder(source_ids, attention_mask=attention_mask)
+        
+        cur_target_ids = torch.full((batch_size, 1), self.config.decoder_start_token_id, 
+                                    dtype=torch.long, device=device)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        
+        for _ in range(max_new_token):
+            out = self.decoder(cur_target_ids, memory)
+            logits = self.lm_head(out)
+            next_token_id = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+            
+            next_token_id = torch.where(finished.unsqueeze(1), 
+                                        torch.tensor(self.config.pad_token_id, device=device), 
+                                        next_token_id)
+            
+            cur_target_ids = torch.cat([cur_target_ids, next_token_id], dim=1)
+            finished |= (next_token_id.squeeze(-1) == self.config.eos_token_id)
+            
+            if finished.all():
+                break
+        return cur_target_ids
