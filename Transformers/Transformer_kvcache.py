@@ -1,7 +1,9 @@
 import torch
-from torch.nn.modules.transformer import Transformer
 from math import sqrt, log
 from Config import T5Config
+from kvcache import KVcache
+
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
 
 def casual_mask(seq_len: int):
     mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
@@ -61,10 +63,11 @@ class T5PositionEmbedding(torch.nn.Module):
         res += torch.where(is_small, n, val_if_large)
         return res
     
-    def forward(self, seq_len):
+    def forward(self, q_len, k_len):
         """生成这个 seq 对应的 relative id 矩阵"""
-        seq = torch.arange(0, seq_len, device=self.embedding.weight.device) # 保持设备一致
-        relative_id = seq[:, None] - seq[None, :]   # [L, L]
+        seq_q = torch.arange(0, q_len, device=self.embedding.weight.device) # 保持设备一致
+        seq_k = torch.arange(0, k_len, device=self.embedding.weight.device)
+        relative_id = seq_q[:, None] - seq_k[None, :]
         relative_bucket_id = self._relative_position_bucket(relative_id, self.num_buckets, self.max_distance).long()    # [L, L]
         position_bias = self.embedding(relative_bucket_id)  # [L, L, H]
         position_bias = position_bias.permute(2, 0, 1).unsqueeze(0)
@@ -108,20 +111,29 @@ class Self_Attention(torch.nn.Module):
         self.v = torch.nn.Linear(in_dim, out_dim, bias=False)
         self.o = torch.nn.Linear(out_dim, out_dim, bias=False)
     
-    def forward(self, x, position_embedding=None):
+    def forward(self, x, position_embedding=None, mask=None, pask_kv_cache=None):
         B, L, _  = x.shape
         q, k, v = self.q(x), self.k(x), self.v(x)
+
         # split and reshape
         # shape : [B, H, L, D]
         q = q.reshape(B, L, self.num_head, self.head_dim).permute(0, 2, 1, 3)
         k = k.reshape(B, L, self.num_head, self.head_dim).permute(0, 2, 1, 3)
         v = v.reshape(B, L, self.num_head, self.head_dim).permute(0, 2, 1, 3)
 
+        if pask_kv_cache:
+            k_cache, v_cache = pask_kv_cache
+            k = torch.cat([k_cache, k], dim=-2)
+            v = torch.cat([v_cache, v], dim=-2)
+
         # attention
         # score : [B, H, L, L]
         attn_score = torch.matmul(q, k.permute(0, 1, 3, 2)) / sqrt(self.head_dim)
         if position_embedding is not None:
-            attn_score = attn_score + position_embedding
+            attn_score = attn_score + position_embedding    # 这里和 T5 的embedding长度对应
+        if mask is not None:
+            mask = mask.view(1, 1, mask.size(-2), mask.size(-1)).to(x.device)
+            attn_score += mask
         score = torch.softmax(attn_score, dim=-1).matmul(v)
 
         # concat
@@ -130,7 +142,57 @@ class Self_Attention(torch.nn.Module):
         # o_proj
         score_proj = self.o(score_cat)
 
-        return score_proj
+        return score_proj, (k, v)
+
+class Cross_Attention(torch.nn.Module):
+    def __init__(self, in_dim, out_dim, num_head=8):
+        super().__init__()
+        assert out_dim % num_head == 0
+        self.head_dim = out_dim // num_head  # 单个头输出维度
+        self.num_head = num_head
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        
+        self.q = torch.nn.Linear(in_dim, out_dim, bias=False)
+        self.k = torch.nn.Linear(in_dim, out_dim, bias=False)
+        self.v = torch.nn.Linear(in_dim, out_dim, bias=False)
+        self.o = torch.nn.Linear(out_dim, out_dim, bias=False)
+    
+    def forward(self, x, memory, position_embedding=None, mask=None, memory_cache=None):
+        """
+        x : [B, Lt, D] (Lt is L of target)
+        memory : [B, Ls, D] (Ls if L of source)
+        return attn_score
+        """
+        B, Lt, _ = x.shape
+        q = self.q(x)
+        q = q.reshape(B, Lt, self.num_head, self.head_dim).permute(0, 2, 1, 3)  # [B, H, Lt, D]
+
+        if memory_cache:
+            k, v = memory_cache
+        else:
+            B, Ls, _ = memory.shape
+            k, v = self.k(memory), self.v(memory)
+            k = k.reshape(B, Ls, self.num_head, self.head_dim).permute(0, 2, 1, 3)
+            v = v.reshape(B, Ls, self.num_head, self.head_dim).permute(0, 2, 1, 3)
+
+        # attention
+        # score : [B, H, Lt, Ls]
+        attn_score = torch.matmul(q, k.permute(0, 1, 3, 2)) / sqrt(self.head_dim)
+        if position_embedding is not None:
+            attn_score += position_embedding
+        if mask is not None:
+            mask = mask.view(1, 1, mask.size(-2), mask.size(-1)).to(x.device)
+            attn_score += mask
+        score = torch.softmax(attn_score, dim=-1).matmul(v)
+
+        # concat
+        score_cat = score.permute(0, 2, 1, 3).reshape(B, Lt, self.out_dim)   # [B, Lt, D]
+
+        # o_proj
+        score_proj = self.o(score_cat)
+
+        return score_proj, (k, v)
     
 class Encode_Layer(torch.nn.Module):
     def __init__(self, model_dim, num_head, ffn_dim, dropout_rate=0.1):
@@ -194,52 +256,6 @@ class Encoder(torch.nn.Module):
         x = self.norm(x)
         return x
 
-class Cross_Attention(torch.nn.Module):
-    def __init__(self, in_dim, out_dim, num_head=8):
-        super().__init__()
-        assert out_dim % num_head == 0
-        self.head_dim = out_dim // num_head  # 单个头输出维度
-        self.num_head = num_head
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        
-        self.q = torch.nn.Linear(in_dim, out_dim, bias=False)
-        self.k = torch.nn.Linear(in_dim, out_dim, bias=False)
-        self.v = torch.nn.Linear(in_dim, out_dim, bias=False)
-        self.o = torch.nn.Linear(out_dim, out_dim, bias=False)
-    
-    def forward(self, x, memory, position_embedding=None, mask=None):
-        """
-        x : [B, Lt, D] (Lt is L of target)
-        memory : [B, Ls, D] (Ls if L of source)
-        return attn_score
-        """
-        B, Lt, _ = x.shape
-        B, Ls, _ = memory.shape
-        q, k, v = self.q(x), self.k(memory), self.v(memory)
-        # split and reshape
-        q = q.reshape(B, Lt, self.num_head, self.head_dim).permute(0, 2, 1, 3)  # [B, H, Lt, D]
-        k = k.reshape(B, Ls, self.num_head, self.head_dim).permute(0, 2, 1, 3)  # [B, H, Ls, D]
-        v = v.reshape(B, Ls, self.num_head, self.head_dim).permute(0, 2, 1, 3)  # [B, H, Ls, D]
-
-        # attention
-        # score : [B, H, Lt, Ls]
-        attn_score = torch.matmul(q, k.permute(0, 1, 3, 2)) / sqrt(self.head_dim)
-        if position_embedding is not None:
-            attn_score += position_embedding
-        if mask is not None:
-            mask = mask.view(1, 1, mask.size(-2), mask.size(-1)).to(x.device)
-            attn_score += mask
-        score = torch.softmax(attn_score, dim=-1).matmul(v)
-
-        # concat
-        score_cat = score.permute(0, 2, 1, 3).reshape(B, Lt, self.out_dim)   # [B, Lt, D]
-
-        # o_proj
-        score_proj = self.o(score_cat)
-
-        return score_proj
-
 class Decode_Layer(torch.nn.Module):
     def __init__(self, model_dim, num_head, ffn_dim, dropout_rate=0.1):
         super().__init__()
@@ -250,22 +266,22 @@ class Decode_Layer(torch.nn.Module):
 
         self.dropout = torch.nn.Dropout(p=self.dropout_rate)
         self.self_attn_norm  = RMS_Norm(self.model_dim)
-        self.self_attn = Cross_Attention(self.model_dim, self.model_dim, self.num_head)
+        self.self_attn = Self_Attention(self.model_dim, self.model_dim, self.num_head)
         self.cross_attn_norm = RMS_Norm(self.model_dim)
         self.cross_attn = Cross_Attention(self.model_dim, self.model_dim, self.num_head)
         self.mlp_norm = RMS_Norm(self.model_dim)
         self.mlp = FFN(self.model_dim, self.ffn_dim, self.dropout_rate)
 
-    def forward(self, x, memory, position_embedding, casual_mask):
+    def forward(self, x, memory, position_embedding, casual_mask, pask_kv_cache=None, memeory_cache=None):
         attn_norm_x = self.self_attn_norm(x)
-        attn_x = self.dropout(self.self_attn(attn_norm_x, attn_norm_x, mask=casual_mask)) + x
+        attn_x, pask_kv_cache = self.dropout(self.self_attn(attn_norm_x, mask=casual_mask, pask_kv_cache=pask_kv_cache)) + x
 
         cross_norm_x = self.cross_attn_norm(attn_x)
-        cross_x = self.dropout(self.cross_attn(cross_norm_x, memory, position_embedding)) + attn_x
+        cross_x, memeory_cache = self.dropout(self.cross_attn(cross_norm_x, memory, position_embedding, memeory_cache=memeory_cache)) + attn_x
 
         mlp_norm_x = self.mlp_norm(cross_x)
         mlp_x = self.dropout(self.mlp(mlp_norm_x)) + cross_x
-        return mlp_x
+        return mlp_x, pask_kv_cache, memeory_cache
 
 class Decoder(torch.nn.Module):
     def __init__(
@@ -287,16 +303,26 @@ class Decoder(torch.nn.Module):
         self.norm = RMS_Norm(self.model_dim)
         self.position_embed = T5PositionEmbedding(self.num_head, 32, max_distance=int(2 ** 10))
 
-    def forward(self, input_ids, memory):
-        mask = casual_mask(input_ids.size(1))
+    def forward(self, input_ids, memory, decode_cache_list:dict=None, memory_cache_list:dict=None):
+        if input_ids.size(1) != 1:
+            mask = casual_mask(input_ids.size(1))
+        else:
+            mask = None
         x = self.embedding(input_ids)
-        for layer in self.decode_layers:
-            x = layer(x, memory, None, mask)
+
+        for i, layer in enumerate(self.decode_layers):
+            pask_kv_cache = decode_cache_list.get(i, None) if decode_cache_list else None
+            memory_cache = memory_cache_list.get(i, None) if memory_cache_list else None
+            x, pask_kv_cache_i, memory_cache_i = layer(x, memory, None, mask, pask_kv_cache, memory_cache)
+            if decode_cache_list:
+                decode_cache_list[i] = pask_kv_cache_i
+            if memory_cache_list:
+                memory_cache_list[i] = memory_cache_i
         x = self.norm(x)
         return x
 
 class Model(torch.nn.Module):
-    def __init__(self, config):
+    def __init__(self, config:T5Config):
         super().__init__()
         self.config = config
         self.encoder = Encoder(config.num_layers, config.vocab_size, config.model_dim, 
@@ -314,29 +340,16 @@ class Model(torch.nn.Module):
         logits = self.lm_head(decoder_output)
         return logits
 
-    def generate(self, source_ids, max_new_token=50):
-        batch_size = source_ids.size(0)
-        device = source_ids.device
-        
-        attention_mask = (source_ids != self.config.pad_token_id).long()
-        memory = self.encoder(source_ids, attention_mask=attention_mask)
-        
-        cur_target_ids = torch.full((batch_size, 1), self.config.decoder_start_token_id, 
-                                    dtype=torch.long, device=device)
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        
-        for _ in range(max_new_token):
-            out = self.decoder(cur_target_ids, memory)
-            logits = self.lm_head(out)
-            next_token_id = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-            
-            next_token_id = torch.where(finished.unsqueeze(1), 
-                                        torch.tensor(self.config.pad_token_id, device=device), 
-                                        next_token_id)
-            
-            cur_target_ids = torch.cat([cur_target_ids, next_token_id], dim=1)
-            finished |= (next_token_id.squeeze(-1) == self.config.eos_token_id)
-            
-            if finished.all():
-                break
-        return cur_target_ids
+    def generate(
+            self, 
+            source_ids, 
+            use_cache=False, 
+            max_new_token=50
+        ):
+        # init kv_cache
+        cache_manager = KVcache()
+
+        # prefill 
+
+
+        # decode
