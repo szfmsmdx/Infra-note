@@ -303,7 +303,7 @@ class Decoder(torch.nn.Module):
         self.norm = RMS_Norm(self.model_dim)
         self.position_embed = T5PositionEmbedding(self.num_head, 32, max_distance=int(2 ** 10))
 
-    def forward(self, input_ids, memory, decode_cache_list:dict=None, memory_cache_list:dict=None):
+    def forward(self, input_ids, memory, cache_maneger:KVcache):
         if input_ids.size(1) != 1:
             mask = casual_mask(input_ids.size(1))
         else:
@@ -311,13 +311,10 @@ class Decoder(torch.nn.Module):
         x = self.embedding(input_ids)
 
         for i, layer in enumerate(self.decode_layers):
-            pask_kv_cache = decode_cache_list.get(i, None) if decode_cache_list else None
-            memory_cache = memory_cache_list.get(i, None) if memory_cache_list else None
+            pask_kv_cache, memory_cache = cache_maneger.get_decoder_cache(i), cache_maneger.get_encoder_cache(i)
             x, pask_kv_cache_i, memory_cache_i = layer(x, memory, None, mask, pask_kv_cache, memory_cache)
-            if decode_cache_list:
-                decode_cache_list[i] = pask_kv_cache_i
-            if memory_cache_list:
-                memory_cache_list[i] = memory_cache_i
+            cache_maneger.update_decoder_cache(i, pask_kv_cache_i)
+            cache_maneger.update_encoder_cache(i, memory_cache_i)
         x = self.norm(x)
         return x
 
@@ -347,9 +344,38 @@ class Model(torch.nn.Module):
             max_new_token=50
         ):
         # init kv_cache
-        cache_manager = KVcache()
-
+        cache_manager = KVcache(self.config.num_layers)
+        
         # prefill 
+        batch_size = source_ids.size(0)
+        device = source_ids.device
 
-
+        attention_mask = (source_ids != self.config.pad_token_id).long()
+        memory = self.encoder(source_ids, attention_mask=attention_mask)
+        cur_target_ids = torch.full(
+            (batch_size, 1), self.config.decoder_start_token_id,
+            dtype=torch.long, device=device
+        )
+        finished = torch.zeros(
+            batch_size, dtype=torch.bool, device=device
+        )
+        
         # decode
+        for _ in range(max_new_token):
+            out = self.decoder(
+                cur_target_ids, memory, cache_manager
+            )
+            logits = self.lm_head(out)
+            next_token_id = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+            next_token_id = torch.where(
+                finished.unsqueeze(1), 
+                torch.tensor(self.config.pad_token_id, device=device), 
+                next_token_id
+            )
+            cur_target_ids = next_token_id
+            finished |= (next_token_id.squeeze(-1) == self.config.pad_token_id)
+
+            if finished.all():
+                break
+    
+        return cur_target_ids
