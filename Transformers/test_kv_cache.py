@@ -32,12 +32,12 @@ def run_stress_test(model, src_ids, use_cache, max_tokens=256):
 if __name__ == "__main__":
     # 配置更深、更长的模型以观察差异
     torch.manual_seed(42)
-    tokenizer = BPE_Tokenizer.load("/data3/szf/Infra-note/Transformers/Tokenizer/tokenizer.pt")
+    tokenizer = BPE_Tokenizer.load("./Tokenizer/tokenizer.pt")
     config = T5Config(tokenizer)
     config.num_layers = 12 
-    config.model_dim = 768
-    config.num_head = 12
-    config.ffn_dim = 3072
+    config.model_dim = 256
+    config.num_head = 16
+    config.ffn_dim = 512
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     base_mem = 0
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # 模拟高压输入：Batch Size = 4, 输入长度 256, 生成长度 512
     batch_size = 4
     input_len = 256
-    gen_len = 1024
+    gen_len = 512
     src_ids = torch.randint(10, 4000, (batch_size, input_len)).to(device)
     
     print(f"\n🚀 开始高压测试 [Batch: {batch_size}, 生成长度: {gen_len}]")

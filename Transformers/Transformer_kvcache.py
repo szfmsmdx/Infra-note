@@ -122,12 +122,11 @@ class Self_Attention(torch.nn.Module):
         v = v.reshape(B, L, self.num_head, self.head_dim).permute(0, 2, 1, 3)
 
         if pask_kv_cache:   # [B, H, L, D]
-            k_cache, v_cache = pask_kv_cache
-            # k = torch.cat([k_cache, k], dim=-2)
-            # v = torch.cat([v_cache, v], dim=-2)
-            k_cache[:, :, step, :] = k.squeeze(2)
-            v_cache[:, :, step, :] = v.squeeze(2)
-            k_cache, v_cache = k_cache[:, :, step + 1, :], v_cache[:, :, step + 1, :]
+            k_buffer, v_buffer = pask_kv_cache
+            k_buffer[:, :, step : step + L, :] = k
+            v_buffer[:, :, step : step + L, :] = v
+            k = k_buffer[:, :, :step + L, :]
+            v = v_buffer[:, :, :step + L, :]
 
         # attention
         # score : [B, H, L, L]
@@ -330,17 +329,14 @@ class Decoder(torch.nn.Module):
         self.norm = RMS_Norm(self.model_dim)
         self.position_embed = T5PositionEmbedding(self.num_head, 32, max_distance=int(2 ** 10))
 
-    def forward(self, input_ids, memory, cache_maneger:KVcache, step):
+    def forward(self, input_ids, memory, cache_maneger:KVcache, step=0):
         cur_L = input_ids.size(1)
         device = input_ids.device
 
-        past_L = 0
         if cache_maneger is not None:
-            first_layer_cache = cache_maneger.get_decoder_cache(0)
-            # 必须同时确保 cache 不是 None 且 里面确实有 Tensor
-            if first_layer_cache is not None and len(first_layer_cache) > 0:
-                past_L = first_layer_cache[0].size(2)
-        total_L = past_L + cur_L
+            total_L = step + cur_L
+        else:
+            total_L = cur_L
         memory_L = memory.size(1)
 
         self_pos_embed = self.position_embed(cur_L, total_L)
@@ -368,9 +364,9 @@ class Decoder(torch.nn.Module):
             )
 
             # 更新缓存
-            if cache_maneger:
-                cache_maneger.update_decoder_cache(i, new_past_kv)
-                cache_maneger.update_encoder_cache(i, new_mem_cache)
+            # if cache_maneger:
+            #     cache_maneger.update_decoder_cache(i, new_past_kv)
+            #     cache_maneger.update_encoder_cache(i, new_mem_cache)
 
         x = self.norm(x)
         return x
@@ -424,7 +420,7 @@ class Model(torch.nn.Module):
                 step_cache = cache_manager
             else:
                 decode_input = torch.cat(generated_tokens, dim=1)   # seq_len 连接
-                step_cache = KVcache(self.config.num_layers)    # 重新创建
+                step_cache = None
             out = self.decoder(decode_input, memory, step_cache, i)
             logits = self.lm_head(out)
 
