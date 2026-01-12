@@ -5,9 +5,9 @@ from kvcache import KVcache
 
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Model
 
-def casual_mask(seq_len: int):
-    mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
-    return torch.zeros(seq_len, seq_len).masked_fill(mask, -1e9)
+def casual_mask(seq_len: int, device):
+    mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+    return torch.zeros(seq_len, seq_len, device=device).masked_fill(mask, -1e9)
 
 class T5PositionEmbedding(torch.nn.Module):
     def __init__(self, num_head, num_buckets=32, max_distance=128):
@@ -111,7 +111,7 @@ class Self_Attention(torch.nn.Module):
         self.v = torch.nn.Linear(in_dim, out_dim, bias=False)
         self.o = torch.nn.Linear(out_dim, out_dim, bias=False)
     
-    def forward(self, x, position_embedding=None, mask=None, pask_kv_cache=None):
+    def forward(self, x, position_embedding=None, mask=None, pask_kv_cache=None, step=0):
         B, L, _  = x.shape
         q, k, v = self.q(x), self.k(x), self.v(x)
 
@@ -121,10 +121,13 @@ class Self_Attention(torch.nn.Module):
         k = k.reshape(B, L, self.num_head, self.head_dim).permute(0, 2, 1, 3)
         v = v.reshape(B, L, self.num_head, self.head_dim).permute(0, 2, 1, 3)
 
-        if pask_kv_cache:
+        if pask_kv_cache:   # [B, H, L, D]
             k_cache, v_cache = pask_kv_cache
-            k = torch.cat([k_cache, k], dim=-2)
-            v = torch.cat([v_cache, v], dim=-2)
+            # k = torch.cat([k_cache, k], dim=-2)
+            # v = torch.cat([v_cache, v], dim=-2)
+            k_cache[:, :, step, :] = k.squeeze(2)
+            v_cache[:, :, step, :] = v.squeeze(2)
+            k_cache, v_cache = k_cache[:, :, step + 1, :], v_cache[:, :, step + 1, :]
 
         # attention
         # score : [B, H, L, L]
@@ -210,7 +213,8 @@ class Encode_Layer(torch.nn.Module):
 
     def forward(self, x, position_embed=None):
         attn_norm_x = self.attn_norm(x)
-        attn_x = self.dropout(self.self_attn(attn_norm_x, position_embedding=position_embed)) + x
+        attn_x, _ = self.self_attn(attn_norm_x, position_embedding=position_embed)
+        attn_x = self.dropout(attn_x) + x
         mlp_norm_x = self.mlp_norm(attn_x)
         mlp_x = self.mlp(mlp_norm_x) + attn_x
         return mlp_x
@@ -248,7 +252,7 @@ class Encoder(torch.nn.Module):
         else:
             extended_mask = 0
 
-        position_embedding = self.position_embed(seq_len)
+        position_embedding = self.position_embed(seq_len, seq_len)
         x = self.embedding(input_ids)
         
         for layer in self.encode_layers:
@@ -272,16 +276,39 @@ class Decode_Layer(torch.nn.Module):
         self.mlp_norm = RMS_Norm(self.model_dim)
         self.mlp = FFN(self.model_dim, self.ffn_dim, self.dropout_rate)
 
-    def forward(self, x, memory, position_embedding, casual_mask, pask_kv_cache=None, memeory_cache=None):
+    def forward(
+            self, 
+            x, 
+            memory, 
+            self_attn_pos, 
+            cross_attn_pos, 
+            casual_mask, 
+            pask_kv_cache=None, 
+            memory_cache=None,
+            step=0
+        ):
         attn_norm_x = self.self_attn_norm(x)
-        attn_x, pask_kv_cache = self.dropout(self.self_attn(attn_norm_x, mask=casual_mask, pask_kv_cache=pask_kv_cache)) + x
+        attn_x, pask_kv_cache = self.self_attn(
+            attn_norm_x, 
+            position_embedding=self_attn_pos, 
+            mask=casual_mask, 
+            pask_kv_cache=pask_kv_cache,
+            step=step
+        )
+        attn_x = self.dropout(attn_x) + x
 
         cross_norm_x = self.cross_attn_norm(attn_x)
-        cross_x, memeory_cache = self.dropout(self.cross_attn(cross_norm_x, memory, position_embedding, memeory_cache=memeory_cache)) + attn_x
+        cross_x, memory_cache = self.cross_attn(
+            cross_norm_x, 
+            memory, 
+            position_embedding=cross_attn_pos, 
+            memory_cache=memory_cache
+        )
+        cross_x = self.dropout(cross_x) + attn_x
 
         mlp_norm_x = self.mlp_norm(cross_x)
         mlp_x = self.dropout(self.mlp(mlp_norm_x)) + cross_x
-        return mlp_x, pask_kv_cache, memeory_cache
+        return mlp_x, pask_kv_cache, memory_cache
 
 class Decoder(torch.nn.Module):
     def __init__(
@@ -303,18 +330,48 @@ class Decoder(torch.nn.Module):
         self.norm = RMS_Norm(self.model_dim)
         self.position_embed = T5PositionEmbedding(self.num_head, 32, max_distance=int(2 ** 10))
 
-    def forward(self, input_ids, memory, cache_maneger:KVcache):
-        if input_ids.size(1) != 1:
-            mask = casual_mask(input_ids.size(1))
-        else:
-            mask = None
+    def forward(self, input_ids, memory, cache_maneger:KVcache, step):
+        cur_L = input_ids.size(1)
+        device = input_ids.device
+
+        past_L = 0
+        if cache_maneger is not None:
+            first_layer_cache = cache_maneger.get_decoder_cache(0)
+            # 必须同时确保 cache 不是 None 且 里面确实有 Tensor
+            if first_layer_cache is not None and len(first_layer_cache) > 0:
+                past_L = first_layer_cache[0].size(2)
+        total_L = past_L + cur_L
+        memory_L = memory.size(1)
+
+        self_pos_embed = self.position_embed(cur_L, total_L)
+        cross_pos_embed = self.position_embed(cur_L, memory_L)
+
+        mask = None
+        if cur_L > 1:
+            mask = casual_mask(cur_L, device)
+
         x = self.embedding(input_ids)
 
         for i, layer in enumerate(self.decode_layers):
-            pask_kv_cache, memory_cache = cache_maneger.get_decoder_cache(i), cache_maneger.get_encoder_cache(i)
-            x, pask_kv_cache_i, memory_cache_i = layer(x, memory, None, mask, pask_kv_cache, memory_cache)
-            cache_maneger.update_decoder_cache(i, pask_kv_cache_i)
-            cache_maneger.update_encoder_cache(i, memory_cache_i)
+            past_kv = cache_maneger.get_decoder_cache(i) if cache_maneger else None
+            mem_cache = cache_maneger.get_encoder_cache(i) if cache_maneger else None
+
+            x, new_past_kv, new_mem_cache = layer(
+                x, 
+                memory, 
+                self_pos_embed, 
+                cross_pos_embed, 
+                mask, 
+                past_kv, 
+                mem_cache,
+                step
+            )
+
+            # 更新缓存
+            if cache_maneger:
+                cache_maneger.update_decoder_cache(i, new_past_kv)
+                cache_maneger.update_encoder_cache(i, new_mem_cache)
+
         x = self.norm(x)
         return x
 
@@ -337,45 +394,53 @@ class Model(torch.nn.Module):
         logits = self.lm_head(decoder_output)
         return logits
 
-    def generate(
-            self, 
-            source_ids, 
-            use_cache=False, 
-            max_new_token=50
-        ):
-        # init kv_cache
-        cache_manager = KVcache(self.config.num_layers)
-        
-        # prefill 
+    def generate(self, source_ids, use_cache=False, max_new_token=50):
         batch_size = source_ids.size(0)
         device = source_ids.device
 
+        # prefill
         attention_mask = (source_ids != self.config.pad_token_id).long()
         memory = self.encoder(source_ids, attention_mask=attention_mask)
-        cur_target_ids = torch.full(
-            (batch_size, 1), self.config.decoder_start_token_id,
-            dtype=torch.long, device=device
-        )
-        finished = torch.zeros(
-            batch_size, dtype=torch.bool, device=device
-        )
-        
+
         # decode
-        for _ in range(max_new_token):
-            out = self.decoder(
-                cur_target_ids, memory, cache_manager
-            )
+        cur_token = torch.full(
+            (batch_size, 1), self.config.decoder_start_token_id, dtype=torch.long, device=device
+        )
+        generated_tokens = [cur_token]
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        cache_manager = KVcache(
+            self.config.num_layers, 
+            batch_size,
+            self.config.num_head,
+            max_new_token, 
+            self.config.model_dim // self.config.num_head,
+            device=device
+        ) if use_cache else None
+
+        for i in range(max_new_token):
+            if use_cache:
+                decode_input = generated_tokens[-1]
+                step_cache = cache_manager
+            else:
+                decode_input = torch.cat(generated_tokens, dim=1)   # seq_len 连接
+                step_cache = KVcache(self.config.num_layers)    # 重新创建
+            out = self.decoder(decode_input, memory, step_cache, i)
             logits = self.lm_head(out)
-            next_token_id = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+
+            next_token_id = torch.argmax(
+                logits[:, -1, :], dim=-1, keepdim=True
+            )
             next_token_id = torch.where(
                 finished.unsqueeze(1), 
-                torch.tensor(self.config.pad_token_id, device=device), 
+                torch.tensor(self.config.pad_token_id, device=device),
                 next_token_id
             )
-            cur_target_ids = next_token_id
-            finished |= (next_token_id.squeeze(-1) == self.config.pad_token_id)
 
+            generated_tokens.append(next_token_id)
+
+            finished |= (next_token_id.squeeze(-1) == self.config.eos_token_id)
             if finished.all():
                 break
-    
-        return cur_target_ids
+
+        return torch.cat(generated_tokens, dim=-1)

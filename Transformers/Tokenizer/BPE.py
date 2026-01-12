@@ -180,18 +180,20 @@ class BPE_Tokenizer():
         with open(save_path, "wb") as f:
             pickle.dump((self.token2id, self.id2token, self.merges, self.vocab_size, self.special_tokens), f)
 
-    def load(self, save_path):
+    @classmethod
+    def load(cls, save_path):
+        instance = cls() 
         with open(save_path, "rb") as f:
             data = pickle.load(f)
             if len(data) == 5:
-                self.token2id, self.id2token, self.merges, self.vocab_size, self.special_tokens = data
+                instance.token2id, instance.id2token, instance.merges, instance.vocab_size, instance.special_tokens = data
             else:
-                self.token2id, self.id2token, self.merges, self.vocab_size = data
-                self.special_tokens = {}
-        for i, (pair, new_id) in enumerate(self.merges):
-            self.merges_rank[pair] = i
-
-        self._encode_word.cache_clear()
+                instance.token2id, instance.id2token, instance.merges, instance.vocab_size = data
+                instance.special_tokens = {}
+        
+        instance.merges_rank = {pair: i for i, (pair, new_id) in enumerate(instance.merges)}
+        instance._encode_word.cache_clear()
+        return instance
 
     def add_special_token(self, tokens : list[str]):
         for token in tokens:
