@@ -181,3 +181,20 @@ $Q^{'\top}_i K'_j=Q^{'\top}_iR(j-i)K_j$
 3. **长度外推性**：RoPE 本质上是在旋转，因此可以通过插值来拓展长度，微调角度就可以让模型的上下文无缝拓展
 	1. NTK-aware scaling（目前主流）：通过压缩基数 base 来实现：比如将 base=10000增加到base=50000，能够实现在不损失局部精度的情况下拓展外推长度
 	2. YaRN 与 Dynamic NTK
+
+# Attention
+## 几种 Attention 对比
+目前主要的 Attention 主要有：
+- MHA（Multi Head Attention）
+- MQA（Multi-Query Attention）
+- GQA（Grouped-Query Attention）
+- MLA（Multi-head Latent Attention）
+如图所示：
+![[Attention.png]]
+### MHA
+
+### MQA
+
+### GQA
+
+### MLA

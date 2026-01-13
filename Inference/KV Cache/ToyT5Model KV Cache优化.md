@@ -217,3 +217,86 @@ config.ffn_dim = 3072
 3. 算子压缩：FlashAttention / PageAttention 等通过 tiling 技术减少显存读写
 
 这里只实现空间压缩部分，其余会在其他章节有涉及：
+> 无优化
+
+```python
+if pask_kv_cache:
+	k_cache, v_cache = pask_kv_cache
+	k = torch.cat([k_cache, k], dim=-2)
+	v = torch.cat([v_cache, v], dim=-2)
+```
+
+>优化后：
+
+kvcache 类预先分配
+```python
+class KVcache():
+	def __init__(
+	self,
+	num_layers,
+	batch_size,
+	num_head,
+	seq_len,
+	head_dim,
+	device
+	):
+
+	"""
+	self.encoder_cache : {
+		idx_layer : (memory_k_cache, memory_v_cache)
+	}
+	self.decoder_cache : {
+		idx_layer : (token_k_cache, token_v_cache)
+	}
+	"""
+	
+	self.num_layers = num_layers
+	self.encoder_cache = defaultdict(tuple)
+	self.decoder_cache = defaultdict(tuple)
+	
+	# 预分配 decoder
+	for i in range(num_layers):
+		self.decoder_cache[i] = (
+		torch.zeros((batch_size, num_head, seq_len, head_dim), device=device), # k
+		torch.zeros((batch_size, num_head, seq_len, head_dim), device=device), # v
+		)
+```
+
+```python
+if pask_kv_cache: # [B, H, L, D]
+	k_buffer, v_buffer = pask_kv_cache
+	k_buffer[:, :, step : step + L, :] = k
+	v_buffer[:, :, step : step + L, :] = v
+	k = k_buffer[:, :, :step + L, :]
+	v = v_buffer[:, :, :step + L, :]
+```
+
+# 结果
+
+```
+配置：
+batch_size = 16
+input_len = 256
+gen_len = 512
+config.num_layers = 16
+config.model_dim = 512
+config.num_head = 16
+config.ffn_dim = 1024
+
+📦 模型参数占用显存: 340.16 MB
+
+🚀 开始高压测试 [Batch: 16, 生成长度: 512]
+------------------------------------------------------------
+【无缓存全量模式】:
+  > 总耗时: 25.92s | 每 Token 均摊: 50.62ms
+  > 峰值分配 (含权重): 1565.77MB
+  > 系统预留 (接近smi): 23548.00MB
+------------------------------------------------------------
+【KV Cache 增量模式】:
+  > 总耗时: 6.34s | 每 Token 均摊: 12.38ms
+  > 峰值分配 (含权重): 1249.84MB
+  > 系统预留 (接近smi): 940.00MB
+------------------------------------------------------------
+🔥 加速比: 4.09x
+```
+在这个配置下，模型加速比还是比较可观的，同时对于 cat 临时分配带来的 GPU 显存压力也有不小的缓解效果
