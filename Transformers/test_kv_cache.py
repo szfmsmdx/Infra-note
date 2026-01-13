@@ -34,10 +34,10 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     tokenizer = BPE_Tokenizer.load("./Tokenizer/tokenizer.pt")
     config = T5Config(tokenizer)
-    config.num_layers = 12 
-    config.model_dim = 256
+    config.num_layers = 16 
+    config.model_dim = 512
     config.num_head = 16
-    config.ffn_dim = 512
+    config.ffn_dim = 1024
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     base_mem = 0
@@ -51,7 +51,7 @@ if __name__ == "__main__":
         model = Model(config).eval()
 
     # 模拟高压输入：Batch Size = 4, 输入长度 256, 生成长度 512
-    batch_size = 4
+    batch_size = 16
     input_len = 256
     gen_len = 512
     src_ids = torch.randint(10, 4000, (batch_size, input_len)).to(device)
