@@ -17,7 +17,9 @@ Instance 的粒度更小，在 Layer 的基础上，把每个 channel 也作为�
 Group Norm 和 Instance Norm 类似，把几个 通道作为一个  Group，一个 Group 作为一个整体 Norm
 
 # 位置编码
-> 参考文章：[位置编码](https://blog.csdn.net/qq_41897558/article/details/137297209)
+> 参考文章:
+> - [位置编码](https://blog.csdn.net/qq_41897558/article/details/137297209)
+> - [旋转式位置编码 (RoPE) 知识总结](https://zhuanlan.zhihu.com/p/662790439)
 
 对于 Transformer 模型来说，由于纯粹的 Attention 模块是无法捕捉输入顺序的，所以为了解决这个问题，一般有两个办法：
 1. 将位置信息融入到输入中 —— 绝对位置编码
