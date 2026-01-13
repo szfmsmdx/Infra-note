@@ -123,4 +123,80 @@ $$
 ## RoPE 旋转位置编码
 
 > 参考文章：[十分钟读懂旋转编码](https://www.zhihu.com/tardis/zm/art/647109286?source_id=1003)
+> 当然更权威的还是苏神的博客 [Transformer升级之路：2、博采众长的旋转式位置编码 - 科学空间|Scientific Spaces](https://spaces.ac.cn/archives/8265) 
 
+### RoPE 是什么？
+RoPE 是旋转位置编码（Rotary Position Embedding），RoPE 的设计思路：
+- 将位置编码融入到 Q/K 的内积计算中
+- 具体方式：对 Q/K 向量的每一对维度做旋转，旋转的角度由 Token 的位置来决定
+
+**RoPE 的目标**：
+- 让 attention **天然感知相对距离**
+- 让模型**能处理比训练时更长的序列（外推）**
+- 让位置编码在数学上**具有更稳定的性质（旋转不会爆炸）**
+
+所以 RoPE 的本质是：
+> 用旋转变换，把位置编码变成注意力 Q/K 计算的一部分，从而让 attention 直接拥有相对位置感知能力
+
+#### 数学层面推导
+首先，计算注意力的核心是 Q/K 的内积操作: $s_{ij} = Q_i^\top K_j$ 
+我们希望加入位置编码后依然满足几个性质：
+1. 相对位置等变性：
+	1.  $s'_{ij}=f(Q_i, K_j, j-i)$ 只依赖于距离不依赖于绝对坐标
+2. 长度外推稳定性：
+	1. 位置变换不改变向量的模长： $||Q'_i|| = ||Q_i||,||K'_j||=||K_j||$ 
+3. 可组合性
+	1. i，j 的变换应该是无关的： $Q_i^{'\top}K'_j=Q_i^{'\top}T(j-i)K_j$ 
+
+首先由 相对位置等变性+可组合性 我们能够得到：$T(i)^\top T(j) = T(j-i)$ 
+
+这是一个群表示（Group representation）的定义，它要求： $T(p+q)=T(p)T(q)$
+
+并且 T 有逆： $T(−p)=T(p)^{−1}$
+
+其次由不改变向量长我们知道：$||T(i)x|| = ||x|| \rightarrow T(i)^\top T(i) = I$ , 即 T 正交
+
+那么在 d 维度空间中，满足条件：
+1.  $T(i)^\top T(j)=T(j-i)$ 
+2. $T(i)^\top T(i) = I$ 
+并且是**连续、可组合、参数少、长度无关**的解，数学上最优雅的是：
+$T(i) = \bigoplus_{k=0}^{d/2-1}R(i,\theta_k)$ , 其中每 2x2 block 是 $R(i, \theta_k) = \begin{pmatrix} \cos(i\theta_k) & -\sin(i\theta_k) \\ \sin(i\theta_k) & \cos(i\theta_k) \end{pmatrix}$ 
+这就是把 d 维向量分成 (even, odd) 维度对，每一对做一个旋转
+
+在实际的使用过程中，常见的做法是使用指数衰减的对数刻度表 $\theta_k=b^{-2k/d}$ 
+一般 b=1e5 或一个实践可用解即可
+
+在实际工程中，由于 RoPE 的矩阵是很稀疏的，所以一般这样构造：
+
+$$
+\begin{equation} \begin{pmatrix} q_0 \\ q_1 \\ q_2 \\ q_3 \\ \vdots \\ q_{d-2} \\ q_{d-1} \end{pmatrix} \otimes \begin{pmatrix} \cos m\theta_0 \\ \cos m\theta_0 \\ \cos m\theta_1 \\ \cos m\theta_1 \\ \vdots \\ \cos m\theta_{d/2-1} \\ \cos m\theta_{d/2-1} \end{pmatrix} + \begin{pmatrix} -q_1 \\ q_0 \\ -q_3 \\ q_2 \\ \vdots \\ -q_{d-1} \\ q_{d-2} \end{pmatrix} \otimes \begin{pmatrix} \sin m\theta_0 \\ \sin m\theta_0 \\ \sin m\theta_1 \\ \sin m\theta_1 \\ \vdots \\ \sin m\theta_{d/2-1} \\ \sin m\theta_{d/2-1} \end{pmatrix} \end{equation}
+$$
+
+### RoPE 远程衰减性
+RoPE的远程衰减性体现在数学期望上
+$Q^{'\top}_i K'_j=Q^{'\top}_iR(j-i)K_j$ 
+当 $||j-i||$  很大时， $R(j-i)\approx 大角度旋转$ ，Q/K 方向随机，在高维多频情况下$E(Q^{'\top}_i R(p) K_j)\rightarrow 0 (p\to \infty)$   
+
+### 为什么大模型要用 RoPE
+1. 实现效率：RoPE 是乘性的，因此适合做并行计算
+2. 远程衰减性：越远的词关系越不紧密，符合人类直觉
+3. **长度外推性**：RoPE 本质上是在旋转，因此可以通过插值来拓展长度，微调角度就可以让模型的上下文无缝拓展
+	1. NTK-aware scaling（目前主流）：通过压缩基数 base 来实现：比如将 base=10000增加到base=50000，能够实现在不损失局部精度的情况下拓展外推长度
+	2. YaRN 与 Dynamic NTK
+
+# Attention
+## 几种 Attention 对比
+目前主要的 Attention 主要有：
+- MHA（Multi Head Attention）
+- MQA（Multi-Query Attention）
+- GQA（Grouped-Query Attention）
+- MLA（Multi-head Latent Attention）
+如图所示：
+![[Attention.png]]
+### MHA
+
+### MQA
+
+### GQA
+
+### MLA
