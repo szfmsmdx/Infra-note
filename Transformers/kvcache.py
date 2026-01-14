@@ -54,3 +54,31 @@ class KVcache():
     def reset(self):
         self.encoder_cache.clear()
         self.decoder_cache.clear()
+
+
+class LlamaLayerCache:
+    def __init__(self, config, batch_size, device):
+        self.max_seq_len = config.max_new_tokens
+        self.n_kv_heads = config.num_kv_heads
+        self.head_dim = config.dim // config.num_heads
+        
+        # 预分配连续显存 [B, G, Max_L, D]
+        cache_shape = (batch_size, self.n_kv_heads, self.max_seq_len, self.head_dim)
+        self.k_cache = torch.zeros(cache_shape, device=device)
+        self.v_cache = torch.zeros(cache_shape, device=device)
+
+    def update(self, k_val, v_val, start_pos):
+        """
+        k_val/v_val: [B, G, cur_L, D]
+        """
+        bsz, n_kv_heads, q_len, head_dim = k_val.shape
+        
+        # 写入当前步的 KV
+        self.k_cache[:, :, start_pos : start_pos + q_len, :] = k_val
+        self.v_cache[:, :, start_pos : start_pos + q_len, :] = v_val
+        
+        # 返回 0 到当前位置的所有 KV 视图
+        return (
+            self.k_cache[:, :, : start_pos + q_len, :],
+            self.v_cache[:, :, : start_pos + q_len, :]
+        )
