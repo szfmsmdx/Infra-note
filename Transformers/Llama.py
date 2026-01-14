@@ -4,18 +4,46 @@ import torch.nn.functional as F
 from math import sqrt
 from Config import LlamaConfig
 from Tokenizer.BPE import BPE_Tokenizer
+from Transformers.Modules.MLA import *
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+def precompute_freqs_cis(dim: int, end: int, base: float=1e4):
+    theta = torch.pow(base, -2 * torch.arange(0, dim / 2) / dim)    # [dim / 2]
+    i_vals = torch.arange(end).unsqueeze(1)                         # [end, 1]    
+    freqs = i_vals * theta                                          # [end, dim / 2] 广播
+    return torch.polar(torch.ones_like(freqs), freqs)               # [end, dim / 2]
 
-def apply_rotary_emb(q, k):
+def repeat_kv(x : torch.Tensor, num_rpt: int):
     """
-    q,k : [B, H, L, D]
+    x : [B, H_kv, L, D]
     """
+    bsz, n_kv_heads, q_len, head_dim = x.shape
+    if num_rpt == 1:
+        return x
+    return (
+        x[:, :, None, :, :]
+        .expand(bsz, n_kv_heads, num_rpt, q_len, head_dim)
+        .reshape(bsz, n_kv_heads * num_rpt, q_len, head_dim)
+    )
 
+def apply_rope_emb(q, k, freqs_cis):
+    """
+    q : [B, H, L, D]
+    k : [B, H, L, D]
+    freqs_cis : [L, D / 2]
+    """
+    # reshape 为 [B, H, L, D / 2, 2] -> [B, H, L, D / 2] complex 复数
+    q_ = torch.view_as_complex(q.float().reshape(*q.shape[:-1], -1, 2))
+    k_ = torch.view_as_complex(k.float().reshape(*k.shape[:-1], -1, 2))
+
+    # freqs_cis [L, D/2] -> [1, 1, L, D/2]
+    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(1)
+
+    # 广播 -> 相乘[B, H, L, D / 2] -> view_as_real [B, H, L, D/2, 2] -> flattn(-2) (D/2, 2) ->(D)
+    # 这里 freqs_cis 和 q_ 都是复数相乘，复数相乘已经实现了相邻元素的旋转了
+    q_out = torch.view_as_real(q_ * freqs_cis).flatten(-2)  # GQA 硬编码变成 5D 向量会崩溃，采用 -2 的相对编码
+    k_out = torch.view_as_real(k_ * freqs_cis).flatten(-2)
+
+    return q_out.type_as(q), k_out.type_as(k)
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
@@ -42,102 +70,105 @@ class LlamaMLP(nn.Module):
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 class LlamaAttention(nn.Module):
-    def __init__(self, dim, num_heads):
+    def __init__(self, config:LlamaConfig):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
+        dim = config.dim
+        self.num_heads = config.num_heads
+        self.num_kv_heads = config.num_kv_heads
+        self.num_group = config.num_group
+        self.head_dim = dim // self.num_heads
         
-        self.q_proj = nn.Linear(dim, dim, bias=False)
-        self.k_proj = nn.Linear(dim, dim, bias=False)
-        self.v_proj = nn.Linear(dim, dim, bias=False)
-        self.o_proj = nn.Linear(dim, dim, bias=False)
+        self.q_proj = torch.nn.Linear(dim, self.head_dim * self.num_heads, bias=False)
+        self.k_proj = torch.nn.Linear(dim, self.head_dim * self.num_kv_heads, bias=False)
+        self.v_proj = torch.nn.Linear(dim, self.head_dim * self.num_kv_heads, bias=False)
+        self.o_proj = torch.nn.Linear(dim, dim, bias=False)
 
-    def forward(self, x, mask=None, kv_cache=None):
+    def forward(self, x, freqs_cis, mask=None, kv_cache=None):
+        """GQA"""
         bsz, q_len, _ = x.shape
-        # q,k,v [B, H, L, D]
-        q = self.q_proj(x).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        q = self.q_proj(x).reshape(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)   # [B, H, L, D]
+        k = self.k_proj(x).reshape(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).reshape(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        # 这里预留给 RoPE (Rotary Positional Embedding)
-        # q, k = apply_rotary_emb(q, k, ...) 
+        q, k = apply_rope_emb(q, k, freqs_cis[:q_len])
 
-        # 基础 KV Cache 逻辑
-        if kv_cache is not None:
-            k, v = kv_cache.update(k, v)
 
-        # Scaled Dot-Product Attention
-        scores = torch.matmul(q, k.transpose(-2, -1)) / sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask
-        
-        attn = F.softmax(scores.float(), dim=-1).type_as(q)
-        output = torch.matmul(attn, v) # [bsz, num_heads, q_len, head_dim]
-        
-        output = output.transpose(1, 2).reshape(bsz, q_len, -1)
-        return self.o_proj(output)
+
 
 class LlamaLayer(nn.Module):
-    def __init__(self, dim, num_heads, intermediate_size):
+    def __init__(self, config: LlamaConfig):
         super().__init__()
-        self.attention = LlamaAttention(dim, num_heads)
-        self.mlp = LlamaMLP(dim, intermediate_size)
-        self.attention_norm = RMSNorm(dim)
-        self.ffn_norm = RMSNorm(dim)
+        self.attention = LlamaAttention(config)
+        self.mlp = LlamaMLP(config.dim, config.intermediate_size)
+        self.attention_norm = RMSNorm(config.dim)
+        self.ffn_norm = RMSNorm(config.dim)
 
-    def forward(self, x, mask=None, kv_cache=None):
+    def forward(self, x, freqs_cis, mask=None, kv_cache=None):
         # Pre-Norm 结构
-        h = x + self.attention(self.attention_norm(x), mask, kv_cache)
+        h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache)
         out = h + self.mlp(self.ffn_norm(h))
         return out
 
 class LlamaGPT(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: LlamaConfig):
         super().__init__()
         self.embed = nn.Embedding(config.vocab_size, config.dim)
         self.layers = nn.ModuleList([
-            LlamaLayer(config.dim, config.num_heads, config.intermediate_size)
+            LlamaLayer(config)
             for _ in range(config.num_layers)
         ])
         self.norm = RMSNorm(config.dim)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
+        self.freqs_cis = precompute_freqs_cis(
+            dim=config.dim // config.num_heads,
+            end=config.max_new_tokens,
+            base=config.rope_base
+        )
+        self.config = config
 
     def forward(self, input_ids, mask=None):
         x = self.embed(input_ids)
+        freqs_cis = self.freqs_cis.to(x.device)
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x, freqs_cis, mask)
         return self.lm_head(self.norm(x))
-
+    
 if __name__ == "__main__":
-    # 1. 初始化配置与模型
-    tokenizer = BPE_Tokenizer.load("./Tokenizer/tokenizer.pt")
-    config = LlamaConfig(tokenizer)
+    # 模拟 Config 对象，避免依赖外部文件
+    class MockConfig:
+        vocab_size = 32000
+        dim = 128
+        num_heads = 8
+        intermediate_size = 256
+        num_layers = 2
+        max_new_tokens = 512
+        rope_base = 10000.0
+
+    config = MockConfig()
     model = LlamaGPT(config)
     
-    num_params = sum(p.numel() for p in model.parameters())
-    print(f"Llama-style 模型初始化完成，参数量: {num_params / 1e6:.2f} M")
-
-    batch_size = 2
-    seq_len = 10
-    input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_len))
-
+    # 构造数据
+    bsz, seq_len = 2, 16
+    input_ids = torch.randint(0, config.vocab_size, (bsz, seq_len))
+    
+    # 构造 Causal Mask
     mask = torch.full((seq_len, seq_len), float("-inf"))
-    mask = torch.triu(mask, diagonal=1) 
+    mask = torch.triu(mask, diagonal=1)
 
-    print(f"正在进行前向传播测试，输入形状: {input_ids.shape}...")
+    print(f"开始测试... 输入形状: {input_ids.shape}")
+    
     try:
         logits = model(input_ids, mask=mask)
-        print(f"前向传播成功！输出 Logits 形状: {logits.shape}") # 预期 [2, 10, 32000]
+        print("--- 测试通过 ---")
+        print(f"Logits 形状: {logits.shape}") # 预期 [2, 16, 32000]
         
-        if torch.isnan(logits).any():
-            print("警告：输出包含 NaN，检查初始化或 Norm 层")
+        # 简单的一致性检查：RoPE 后的 logits 不应包含 NaN
+        if not torch.isnan(logits).any():
+            print("数值检查: 正常 (无 NaN)")
         else:
-            print("输出数值正常。")
+            print("数值检查: 异常 (存在 NaN)")
             
     except Exception as e:
-        print(f"前向传播失败，错误信息: {e}")
-
-    print("\n--- 优化点确认 ---")
-    print(f"当前 Attention 结构: Multi-Head Attention (MHA)")
-    print(f"Q/K/V Heads 数量: {config.num_heads}/{config.num_heads}/{config.num_heads}")
-    print(f"下一步目标: 修改为 GQA (例如 K/V Heads = 2)")
+        print(f"测试失败！错误信息: {e}")
+        import traceback
+        traceback.print_exc()
