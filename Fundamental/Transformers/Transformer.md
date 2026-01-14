@@ -173,9 +173,20 @@ $$
 $$
 
 ### RoPE 远程衰减性
-RoPE的远程衰减性体现在数学期望上
-$Q^{'\top}_i K'_j=Q^{'\top}_iR(j-i)K_j$ 
-当 $||j-i||$  很大时， $R(j-i)\approx 大角度旋转$ ，Q/K 方向随机，在高维多频情况下$E(Q^{'\top}_i R(p) K_j)\rightarrow 0 (p\to \infty)$   
+RoPE 的远程衰减性实则应该通过 base 来实现（也就是控制 $\theta$ 的那个大常数）
+我们可以这样来看，考虑 $q_m^\top k_n$  的一个最小旋转单元（也就是那个 2x2 的部分，更进一步，我们其实可以直接考虑 q、k 为二维的情况），设在某个频率 $\theta$ 对应的二维子空间中： $$ q = \begin{pmatrix} q_1 \\ q_2 \end{pmatrix}, \quad k = \begin{pmatrix} k_1 \\ k_2 \end{pmatrix} $$ 位置分别是 $p, p'$，定义相对位移： $$ \Delta = p' - p $$ RoPE 的旋转矩阵是： $$ R(\Delta) = \begin{pmatrix} \cos(\Delta\theta) & -\sin(\Delta\theta) \\ \sin(\Delta\theta) & \cos(\Delta\theta) \end{pmatrix} $$
+那么我们乘开可以得到：
+$q^\top R(\Delta) k = (q_1k_1 + q_2k_2)\cos(\Delta\theta) + (q_2k_1 - q_1k_2)\sin(\Delta\theta)$ 
+
+若此时我们记三角函数前的系数分别为 A、B，由辅助角公式我们可以得知：$q^\top R(\Delta) k=\sqrt{A^2+B^2}\cos(\Delta\theta-\phi)$ 
+
+而 $A^2+B^2=(q_1k_1 + q_2k_2)^2+(q_2k_1 - q_1k_2)^2=||q||^2||k||^2$
+
+进一步简化我们知道 $q_2k_1 - q_1k_2=||q|| ||k|| \cos(\Delta\theta-\phi)$ , 其中 $\phi$ 也只与 q k 的坐标有关，在此讨论下我们可以看做常数（与距离无关）
+
+所以我们将 2x2 看做一个 block ，由分块矩阵相关知识我们知道，那么总的频率和应该是这样 $\sum_i\cos(\Delta\theta_i+\phi_i)$ 
+
+进一步，这里 $\Delta$ 我们可以看做是变量的话（讨论距离的远程衰减），那么实际的周期应该由 $\theta$ 控制，而这个 $\theta$ 在实践中规定为 $base^{-2i/d}$ ，base 通常取 1e5 这种，那么他的周期就应该是 $2\pi / theta$ ,也就是 $2\pi * base ^{2i/d}$ 那么如果 base 越大，周期长度越大，周期越大，我们就可以保证更多的距离落在第一个半周期内，而第一个半周期也正好是单调递减区间，这也就是远程衰减性的原因
 
 ### 为什么大模型要用 RoPE
 1. 实现效率：RoPE 是乘性的，因此适合做并行计算
@@ -183,6 +194,8 @@ $Q^{'\top}_i K'_j=Q^{'\top}_iR(j-i)K_j$
 3. **长度外推性**：RoPE 本质上是在旋转，因此可以通过插值来拓展长度，微调角度就可以让模型的上下文无缝拓展
 	1. NTK-aware scaling（目前主流）：通过压缩基数 base 来实现：比如将 base=10000增加到base=50000，能够实现在不损失局部精度的情况下拓展外推长度
 	2. YaRN 与 Dynamic NTK
+
+更进一步的外推讨论参考：[[长度外推]]
 
 # Attention
 ## 几种 Attention 对比
@@ -194,9 +207,50 @@ $Q^{'\top}_i K'_j=Q^{'\top}_iR(j-i)K_j$
 如图所示：
 ![[Attention.png]]
 ### MHA
+最经典的 Attention，我们把每个 Q、K、V 都拆成不同的头对应去算他的 Attention score，然后 concat 连接后通过一个投影 O 矩阵得到最终的结果
+
+设计动机：
+- 一个 head 可能关注**语法**
+- 一个 head 关注**长程依赖**
+- 一个 head 关注**局部模式**
+
+问题：
+- $\text{KV size} \propto h \cdot L \cdot d_h$ 
+- head 之间高度冗余
+
+>所以head也不是越多越好，一方面head多有冗余，另方面，head 多，head_dim 小表达能力会下降
 
 ### MQA
+每个 head 有自己的 Q，但是所有 head 共享一组 K、V
+动机：
+- 压缩 kv cache
+
+问题：
+- 所有 head 共享同一“检索空间”
+- 表达能力明显下降
+- 实践中只在小模型或强工程约束下使用
+
+>显然 Q 是不能共享的，Q决定了问什么，如果这个也共享那么 head 就失去意义了
 
 ### GQA
+MHA 和 MQA 的折中版本，也是目前工业界主流方法
+如上图所示：
+- head 分组，每组由一些 Q 组成
+- 这些 head 共享 kv
+
+动机：
+- 因为 kv 的冗余远大于 Q
+	- - Q 表示“当前位置关注什么” → 更敏感
+	- K/V 表示“上下文内容” → 冗余度高
+
+优点：
+- 推理速度几乎不降，显存占用大幅降低
+- 表现也不错
 
 ### MLA
+> DeepSeek 提出，不是简单共享 KV，而是把 KV 投影到一个低维空间再重建
+> 参考了这篇文章：[(25 封私信 / 78 条消息) 【attention1】MHA、MQA、GQA和MLA - 知乎](https://zhuanlan.zhihu.com/p/21151178690)、[(25 封私信 / 78 条消息) 【LLM进阶系列】DeepSeek MLA 公式详细推导+代码实现 - 知乎](https://zhuanlan.zhihu.com/p/21817182991)
+
+
+
+
