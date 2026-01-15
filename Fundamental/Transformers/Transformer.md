@@ -251,6 +251,6 @@ MHA 和 MQA 的折中版本，也是目前工业界主流方法
 > DeepSeek 提出，不是简单共享 KV，而是把 KV 投影到一个低维空间再重建
 > 参考了这篇文章：[(25 封私信 / 78 条消息) 【attention1】MHA、MQA、GQA和MLA - 知乎](https://zhuanlan.zhihu.com/p/21151178690)、[(25 封私信 / 78 条消息) 【LLM进阶系列】DeepSeek MLA 公式详细推导+代码实现 - 知乎](https://zhuanlan.zhihu.com/p/21817182991)
 
-
-
-
+效果：
+- 推理效果相当
+- kv cache大幅下降
