@@ -160,21 +160,102 @@ def __init__(self, config: Config, rank: int, event: Event | list[Event]):
 	self.sampler = Sampler()
 	self.warmup_model()
 	self.allocate_kv_cache()
-	if not self.enforce_eager:
+	if not self.enforce_eager:  # True 则走普通 torch 代码
 		self.capture_cudagraph()
 	torch.set_default_device("cpu")
 	torch.set_default_dtype(default_dtype)
 	
 	if self.world_size > 1:
-		if rank == 0:
+		if rank == 0:  # 主进程逻辑
 			self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
-			dist.barrier()
+			dist.barrier()  # 等待所有的分布式进程都到达 barrier，一种同步操作  
 		else:
 			dist.barrier()
-			self.shm = SharedMemory(name="nanovllm")
+			self.shm = SharedMemory(name="nanovllm")  # 连接主进程的 sharemem
 			self.loop()
 ```
 
 关于 ModelRunner 的初始化过程，可以看到
-
+Runner 主要干三件事：
+- 初始化子进程，初始化通信 group
+- 读取模型，进行张量分割实现 tp 并行
+- 预分配 kvcache，通过一次 warmup 来试探可以系统可以分配多少显存
 #### Scheduler
+然后就是 scheduler 调度器的初始化
+
+```python
+class Scheduler:
+	def __init__(self, config: Config):
+		self.max_num_seqs = config.max_num_seqs # 最长 decode 长度
+		self.max_num_batched_tokens = config.max_num_batched_tokens # prefill 塞进去的最大长度
+		self.eos = config.eos
+		self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+		# continues batching基础实现
+		self.waiting: deque[Sequence] = deque()
+		self.running: deque[Sequence] = deque()
+```
+
+##### Sequence
+其中 Sequence 则是具体的请求序列
+```python
+class Sequence:
+	block_size = 256
+	counter = count() # 全局计数器, 数据实体，记录请求的状态
+
+def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+	self.seq_id = next(Sequence.counter)
+	self.status = SequenceStatus.WAITING
+	self.token_ids = copy(token_ids)
+	self.last_token = token_ids[-1]
+	self.num_tokens = len(self.token_ids)
+	self.num_prompt_tokens = len(token_ids) # sequence初始化记录 prompt 长度
+	self.num_cached_tokens = 0 # prefix caching，prefill的前多少个词已经被算过了
+	self.block_table = [] # 这个请求得到的 block
+	self.temperature = sampling_params.temperature
+	self.max_tokens = sampling_params.max_tokens
+	self.ignore_eos = sampling_params.ignore_eos
+```
+
+## generate
+经过初始化，generate 过程分两块
+```python
+llm.generate(["Benchmark: "], SamplingParams())
+t = time.time()
+llm.generate(prompt_token_ids, sampling_params, use_tqdm=True)
+t = (time.time() - t)
+```
+
+其中第一次 generate 的作用是：
+- torch 和 cuda 底层驱动的初始化
+- PageAttention 的首轮物理分配（虽然初始化分配了显存，但 OS 和 GPU 驱动是“延迟分配”的，只有写入数据才会物理映射页面）
+- Triton 内核与编译器冷启动
+
+```mermaid
+graph TD
+    A[开始处理当前的 Block i] --> B{计算 Hash h}
+    B -->|块未满 256| C[h = -1 <br/>强制缓存失效]
+    B -->|块满 256| D[h = compute_hash <br/>token_ids, prev_h]
+    
+    C --> E[查找账本 hash_to_block_id]
+    D --> E
+    
+    E --> F{账本里有 h 吗?}
+    
+    F -->|无: Cache Miss| G[从 free_block_ids <br/>弹出一个新 ID]
+    G --> H[调用 _allocate_block <br/>物理标记为已用]
+    
+    F -->|有: 命中哈希| I{内容 token_ids <br/>真的对得上吗?}
+    I -->|对不上: 碰撞| G
+    I -->|对得上: Cache Hit| J{该 Block ID <br/>目前有人在用吗?}
+    
+    J -->|有: block.ref_count > 0| K[引用计数 +1 <br/>Prefix Caching 成功]
+    J -->|无: block.ref_count == 0| L[从 free_block_ids 移除 <br/>'复活'该缓存块]
+    
+    H --> M[更新 Block 元数据 <br/>block.update h, tokens]
+    K --> M
+    L --> M
+    
+    M --> N[写入账本 <br/>hash_to_block_id h = ID]
+    N --> O[记录房产证 <br/>seq.block_table.append ID]
+    O --> P[结束: 下一个 Block]
+```
