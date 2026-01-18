@@ -5,6 +5,7 @@ from math import sqrt
 from Config import LlamaConfig
 from Tokenizer.BPE import BPE_Tokenizer
 from kvcache import LlamaLayerCache
+from torch.autograd.profiler import record_function
 # from Modules.MLA import *
 
 def precompute_freqs_cis(dim: int, end: int, base: float=1e4):
@@ -52,8 +53,11 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
     def forward(self, x):
-        norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return (norm_x.float()).type_as(x) * self.weight
+        # norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        # return (norm_x.float()).type_as(x) * self.weight
+        with record_function("OP: RMSNorm"):
+            norm_x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+            return (norm_x.float()).type_as(x) * self.weight
 
 class LlamaMLP(nn.Module):
     def __init__(self, dim, intermediate_size):
@@ -108,8 +112,13 @@ class LlamaLayer(nn.Module):
         self.ffn_norm = RMSNorm(config.dim)
 
     def forward(self, x, freqs_cis, mask=None, kv_cache=None, start_pos=0):
-        h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
-        out = h + self.mlp(self.ffn_norm(h))
+        # h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
+        # out = h + self.mlp(self.ffn_norm(h))
+        with record_function("LlamaLayer_Total"):
+            with record_function("Attention_Block"):
+                h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
+            with record_function("MLP_Block"):
+                out = h + self.mlp(self.ffn_norm(h))
         return out
 
 class LlamaGPT(nn.Module):

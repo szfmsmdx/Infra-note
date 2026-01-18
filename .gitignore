@@ -13,3 +13,5 @@
 **/__pycache__
 
 **/checkpoints
+
+**llama_profile
