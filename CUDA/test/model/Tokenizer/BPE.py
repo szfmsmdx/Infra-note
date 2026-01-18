@@ -1,3 +1,4 @@
+# BPE toy tokenizer
 import pickle
 from collections import OrderedDict, defaultdict
 from tqdm import tqdm

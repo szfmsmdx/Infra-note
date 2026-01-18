@@ -11,7 +11,9 @@
 
 # pycache
 **/__pycache__
-
 **/checkpoints
 
+# cuda
 **llama_profile
+**build
+**egg-info**

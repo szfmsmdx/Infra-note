@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from math import sqrt
-from Config import LlamaConfig
-from Tokenizer.BPE import BPE_Tokenizer
-from kvcache import LlamaLayerCache
+from model.Config import LlamaConfig
+from model.Tokenizer.BPE import BPE_Tokenizer
+from model.kvcache import LlamaLayerCache
 from torch.autograd.profiler import record_function
 # from Modules.MLA import *
 
