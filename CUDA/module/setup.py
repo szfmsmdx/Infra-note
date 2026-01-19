@@ -2,7 +2,6 @@ import os
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-# 获取当前 setup.py 所在的绝对路径
 abs_path = os.path.dirname(os.path.abspath(__file__))
 
 setup(

@@ -1,8 +1,20 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <math.h>
+#include <cooperative_groups.h> // 引入高级协作组头文件
+#include <cuda_fp16.h>
 
 #define BLOCK_SIZE 1024
+
+// Warp 级别的求和规约
+__device__ float warpReduceSum(float val) {
+    for (int offset = 32/2; offset > 0; offset /= 2) {
+        // __shfl_down_sync 让当前线程直接拿到 tid + offset 线程里的 val
+        // mask = 0xffffffff 表示整个 warp（32 线程）都参与同步。
+        val += __shfl_down_sync(0xffffffff, val, offset);   // 自动忽略越界线程
+    }
+    return val;
+}
 
 __global__ void rms_norm_kernel(
     float* output, 
@@ -11,7 +23,6 @@ __global__ void rms_norm_kernel(
     int dim,
     float eps
 ){
-    // 2D
     int row = blockIdx.x;                           // 当前 block 在grid中的索引
     const float* input_row = input + row * dim;     // 指针偏移
     float* out_row = output + row * dim;            // 输出指针偏移
@@ -72,17 +83,6 @@ __global__ void rms_norm_kernel_v2(
 };
 
 
-#include <cooperative_groups.h> // 引入高级协作组头文件
-
-// Warp 级别的求和规约
-__device__ float warpReduceSum(float val) {
-    for (int offset = 32/2; offset > 0; offset /= 2) {
-        // __shfl_down_sync 让当前线程直接拿到 tid + offset 线程里的 val
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    }
-    return val;
-}
-
 __global__ void rms_norm_kernel_v3(
     float* output, 
     const float* input,
@@ -108,49 +108,205 @@ __global__ void rms_norm_kernel_v3(
     // 处理线程和dim不对应的情况
     // 线程 0 处理 0、blockDim、2*blockDim ...
     // 线程 1 处理 1+0、1+blockDim、1+2*blockDim ...
-    // ...
+    // ... 归到 blockDim 大小
     for (int i = tid; i < dim; i += blockDim.x){
         float v = x_row[i];
-        sum += v * v;   // 存在自己线程的 sum 寄存器中
+        sum += v * v;       // 加到自己的 sum 寄存器中
     }
 
     // block 内规约
-    __shared__ float warp_sum[32];  // warp(32线程)局部和, block内部可见;
-    int lane = tid % 32;            // warp 内部索引
-    int wid = tid / 32;             // warp id
+    __shared__ float warp_sum[32];      // warp 是 block 内共享，block 内所有线程都能看到，存32个float
+    int lane = tid % 32;                // warp 内索引
+    int wid = tid / 32;                 // warp idx
 
-    sum = warpReduceSum(sum);
+    sum = warpReduceSum(sum);           // 每32个线程进行规约，也就是规约到 warp 个数
 
-    if (lane == 0) warp_sum[wid] = sum;
+    if (lane == 0) warp_sum[wid] = sum; // 由 0 号线程干活, 这里 wid 之所以不会越界是因为 block_size最多1024
     __syncthreads();
 
-    sum = (tid < blockDim.x / 32) ? warp_sum[lane] : 0.0f;
-    if (wid == 0) sum = warpReduceSum(sum);
+    // warp 规约，这里需要连续的32，所以取前 32 个
+    // blockDim < 1024 / 32 < 32, 所以对应的第一个warp wid，这时候他们的 lane 对应的就是 wid
+    // 就是把 warp 每个 wid 写入到前32个线程的 sum中
+    sum = (tid < blockDim.x / 32) ? warp_sum[lane] : 0.0f; // 归到前 32 线程
+    if (wid == 0)
+        sum = warpReduceSum(sum);       //  前32线程规约
 
-    // 3. 广播 RMS 结果
-    __shared__ float s_rms;
-    if (tid == 0) {
-        s_rms = rsqrtf(sum / dim + eps);
-    }
+    __shared__ float s_rms;             
+    if(tid == 0)                        // share mem方便后面存取，由 0 号进行计算
+        s_rms = rsqrt(sum / dim + eps);
+
     __syncthreads();
 
-    // 4. 写回结果
-    for (int i = tid; i < dim; i += blockDim.x) {
+    for (int i = tid; i < dim; i += blockDim.x){
         output[row * dim + i] = (x_row[i] * s_rms) * weight[i];
     }
 };
+
+__global__ void rms_norm_kernel_v4(
+    float* output, 
+    const float* input,
+    const float* weight,
+    int dim,
+    float eps
+){
+    int block_idx = blockIdx.x;
+    int tid = threadIdx.x;
+
+    // input 和 output 本质是 float 指针，我们强转成 float4 指针
+    // float4 是一次性处理 4 个 float 的内置类型
+    const float4* x_vec = (const float4*)(input + block_idx * dim);
+    const float4* w_vec = (const float4*)weight;
+    float4* out_vec = (float4*)(output + block_idx * dim);
+
+    int vec_dim = dim / 4; // 向量化的维度是原来的 1/4
+    float sum = 0.0f;
+
+    // 1. 向量化读取与平方累加
+    for (int i = tid; i < vec_dim; i += blockDim.x) {
+        float4 data = x_vec[i];
+        // dim 能被 4 整除得到 vec_dim，且内存地址必须是 16 字节对齐（Tensor 一般是 16字节的）
+        sum += data.x * data.x;
+        sum += data.y * data.y;
+        sum += data.z * data.z;
+        sum += data.w * data.w;
+    }
+
+    // 2. Block 级规约
+    __shared__ float s_warp_sums[32];
+    int lane = tid % 32;
+    int wid = tid / 32;
+
+    sum = warpReduceSum(sum);
+    if (lane == 0) s_warp_sums[wid] = sum;
+    __syncthreads();
+
+    sum = (tid < 32) ? s_warp_sums[lane] : 0.0f;
+    if (wid == 0) sum = warpReduceSum(sum);
+
+    __shared__ float s_rms;
+    if (tid == 0) s_rms = rsqrtf(sum / dim + eps);
+    __syncthreads();
+
+    // 3. 向量化写回
+    for (int i = tid; i < vec_dim; i += blockDim.x) {
+        float4 data = x_vec[i];
+        float4 w = w_vec[i];
+        float4 res;
+        res.x = data.x * s_rms * w.x;
+        res.y = data.y * s_rms * w.y;
+        res.z = data.z * s_rms * w.z;
+        res.w = data.w * s_rms * w.w;
+        out_vec[i] = res; // 一次写回 16 字节
+    }
+}
+
+__global__ void rms_norm_kernel_v5(
+    float* output, 
+    const float* input,
+    const float* weight,
+    int dim,
+    float eps
+){
+    int block_idx = blockDim.x;
+    int tid = threadIdx.x;
+
+    // fp16 格式版本 2byte
+    const uint4* x_vec = (const uint4*)(input + block_idx * dim);       // 每次读取 16 字节
+    const uint4* w_vec = (const uint4*)(weight + block_idx * dim);
+    uint4* out_vec = (uint4*)(output + block_idx * dim);
+
+    int vec_dim = dim / 8;
+    float sum = 0.0f;
+
+    for (int i = tid; i < vec_dim; i += blockDim.x){
+        uint4 raw_data = x_vec[i];
+        half2* h2_ptr = reinterpret_cast<half2*>(&raw_data);    //  类型转换, 16字节转成8*2字节的fp16格式
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j){
+            float2 f2 = __half22float2(h2_ptr[j]);
+            sum += f2.x * f2.x;
+            sum += f2.y + f2.y;
+        }
+    }
+
+    __shared__ float s_warp_sums[32];
+    int lane = tid % 32;
+    int wid = tid / 32;
+
+    sum = warpReduceSum(sum);
+    if (lane == 0) s_warp_sums[wid] = sum;
+    __syncthreads();
+
+    sum = (tid < 32) ? s_warp_sums[lane] : 0.0f;
+    if (wid == 0) sum = warpReduceSum(sum);
+
+    __shared__ float s_rms;
+    if (tid == 0) s_rms = rsqrtf(sum / dim + eps);
+    __syncthreads();
+
+    for (int i = tid; i < vec_dim; i += blockDim.x){
+        uint4 raw_x = x_vec[i];
+        uint4 raw_w = w_vec[i];
+
+        // 强制类型转换
+        half2* x_h2 = reinterpret_cast<half2*>(&raw_x);
+        half2* w_h2 = reinterpret_cast<half2*>(&raw_w);
+        uint4 res_vec;
+        half2* res_h2 = reinterpret_cast<half2*>(&res_vec);
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j){
+            float2 f2_x = __half22float2(x_h2[j]);
+            float2 f2_w = __half22float2(w_h2[j]);
+            float2 out_f2;
+            out_f2.x = f2_x.x * s_rms * f2_w.x;
+            out_f2.y = f2_x.y * s_rms * f2_w.y;
+            res_h2[j] = __float22half2_rn(out_f2);   // f2 -> h2
+        }
+        out_vec[i] = res_vec;
+    }
+}
 
 void rms_norm_cuda_launch(torch::Tensor out, torch::Tensor x, torch::Tensor weight, float eps){
     int num_token = x.size(0);
     int dim = x.size(1);
 
+    // 检查是否是 16 字节对齐
+    bool is_aigned = ((uintptr_t)x.data_ptr<float>()) % 16 == 0;
+    assert(is_aigned && "Tensor must be 16-byte aligned for float4");
+
     dim3 grid(num_token);   // grid 决定有多少个线程块 block
     dim3 block(dim);        // block 决定里面的线程个数
 
-    rms_norm_kernel_v3<<<grid, block>>>(
+    rms_norm_kernel_v4<<<grid, block>>>(
         out.data_ptr<float>(),
         x.data_ptr<float>(),    // 构建模板，以float形式传入
         weight.data_ptr<float>(),
+        dim,
+        eps
+    );
+}
+
+void rms_norm_cuda_launch_half(torch::Tensor out, torch::Tensor x, torch::Tensor weight, float eps) {
+    int num_token = x.size(0);
+    int dim = x.size(1);
+
+    // 检查 16 字节对齐 (uint4 要求)
+    // 注意这里 data_ptr 的类型改成了 at::Half
+    bool is_aligned = ((uintptr_t)x.data_ptr<at::Half>()) % 16 == 0;
+    assert(is_aligned && "Tensor must be 16-byte aligned for uint4/half8");
+
+    dim3 grid(num_token);
+    // 因为一个线程处理 8 个数，所以开启 dim/8 个线程即可
+    // 如果 dim/8 超过 1024，建议固定设为 256/512，依靠 Kernel 里的循环处理
+    int threads = (dim / 8 <= 1024) ? (dim / 8) : 1024;
+    dim3 block(threads);
+
+    rms_norm_kernel_v5<<<grid, block>>>(
+        (half*)out.data_ptr<at::Half>(),
+        (const half*)x.data_ptr<at::Half>(),
+        (const half*)weight.data_ptr<at::Half>(),
         dim,
         eps
     );
