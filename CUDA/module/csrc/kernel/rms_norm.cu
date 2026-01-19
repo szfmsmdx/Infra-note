@@ -138,7 +138,7 @@ __global__ void rms_norm_kernel_v3(
     __syncthreads();
 
     for (int i = tid; i < dim; i += blockDim.x){
-        output[row * dim + i] = (x_row[i] * s_rms) * weight[i];
+        out_row[i] = (x_row[i] * s_rms) * weight[i];
     }
 };
 
@@ -201,18 +201,18 @@ __global__ void rms_norm_kernel_v4(
 }
 
 __global__ void rms_norm_kernel_v5(
-    float* output, 
-    const float* input,
-    const float* weight,
+    half* output,       
+    const half* input,  
+    const half* weight, 
     int dim,
     float eps
 ){
-    int block_idx = blockDim.x;
+    int block_idx = blockIdx.x;
     int tid = threadIdx.x;
 
     // fp16 格式版本 2byte
     const uint4* x_vec = (const uint4*)(input + block_idx * dim);       // 每次读取 16 字节
-    const uint4* w_vec = (const uint4*)(weight + block_idx * dim);
+    const uint4* w_vec = (const uint4*)(weight);
     uint4* out_vec = (uint4*)(output + block_idx * dim);
 
     int vec_dim = dim / 8;
@@ -226,7 +226,7 @@ __global__ void rms_norm_kernel_v5(
         for (int j = 0; j < 4; ++j){
             float2 f2 = __half22float2(h2_ptr[j]);
             sum += f2.x * f2.x;
-            sum += f2.y + f2.y;
+            sum += f2.y * f2.y;
         }
     }
 

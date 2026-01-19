@@ -23,5 +23,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &rms_norm_forward,   // 对应的 C++ 函数地址
         "RMSNorm forward (CUDA)" // 提示文档
     );
-    m.def("forward_half", &rms_norm_cuda_launch_half, "RMSNorm forward half(CUDA)");
+    m.def("forward_half", &rms_norm_forward_half, "RMSNorm forward half(CUDA)");
 }

@@ -85,6 +85,6 @@ def benchmark_half():
 
 if __name__ == "__main__":
     print("--- 运行 FP32 测试 ---")
-    # benchmark() 
+    benchmark() 
     print("\n--- 运行 FP16 测试 ---")
     benchmark_half()
