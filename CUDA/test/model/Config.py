@@ -38,3 +38,4 @@ class LlamaConfig:
             self.vocab_size = len(tokenizer.id2token)
 
         assert self.num_heads % self.num_kv_heads == 0, "GQA 要求头数必须整除"
+        self.num_group = self.num_heads // self.num_kv_heads

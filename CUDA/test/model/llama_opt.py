@@ -6,10 +6,12 @@ from model.Config import LlamaConfig
 from model.Tokenizer.BPE import BPE_Tokenizer
 from model.kvcache import LlamaLayerCache
 from torch.autograd.profiler import record_function
+import custom_ops_cuda
 # from Modules.MLA import *
 
 def precompute_freqs_cis(dim: int, end: int, base: float=1e4):
-    theta = torch.pow(base, -2 * torch.arange(0, dim / 2) / dim)    # [dim / 2]
+    base_t = torch.tensor(base, dtype=torch.float32)
+    theta = torch.pow(base_t, -2 * torch.arange(0, dim / 2) / dim)  # [dim / 2]
     i_vals = torch.arange(end).unsqueeze(1)                         # [end, 1]    
     freqs = i_vals * theta                                          # [end, dim / 2] 广播
     return torch.polar(torch.ones_like(freqs), freqs)               # [end, dim / 2]
@@ -115,10 +117,14 @@ class LlamaLayer(nn.Module):
         # h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
         # out = h + self.mlp(self.ffn_norm(h))
         with record_function("LlamaLayer_Total"):
-            with record_function("Attention_Block"):
-                h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
-            with record_function("MLP_Block"):
-                out = h + self.mlp(self.ffn_norm(h))
+            # h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
+            h_norm_1 = torch.empty_like(x)
+            custom_ops_cuda.rms_norm_fp16(x, self.attention_norm.weight, h_norm_1, self.attention_norm.eps)
+            attn_out = self.attention(h_norm_1, freqs_cis, mask, kv_cache, start_pos)
+            h_norm_2 = torch.empty_like(x)
+            custom_ops_cuda.fused_add_norm(x, attn_out, self.ffn_norm.weight, h_norm_2, self.ffn_norm.eps)
+            mlp_out = self.mlp(h_norm_2)
+            out = x + mlp_out
         return out
 
 class LlamaGPT(nn.Module):

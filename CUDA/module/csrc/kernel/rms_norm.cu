@@ -3,6 +3,7 @@
 #include <math.h>
 #include <cooperative_groups.h> // 引入高级协作组头文件
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 #define BLOCK_SIZE 1024
 
@@ -309,5 +310,157 @@ void rms_norm_cuda_launch_half(torch::Tensor out, torch::Tensor x, torch::Tensor
         (const half*)weight.data_ptr<at::Half>(),
         dim,
         eps
+    );
+}
+
+__global__ void fused_add_rms_norm_fp32(
+    float* x,                 // [B*L, D] - 残差，会被原地更新
+    const float* attn_output, // [B*L, D] - Attention 输出
+    const float* weight,      // [D]
+    float* output,            // [B*L, D] - 归一化后的输出
+    int dim,
+    float eps
+){
+    int block_idx = blockIdx.x;
+    int tid = threadIdx.x;
+
+    float4* x_vec = (float4*)(x + block_idx * dim);
+    const float4* y_vec = (const float4*)(attn_output + block_idx * dim);
+    const float4* w_vec = (const float4*)weight;
+    float4* out_vec = (float4*)(output + block_idx * dim);
+
+    int vec_dim = dim / 4;
+    float sum = 0.0f;
+
+    for(int i = tid; i < vec_dim; i += blockDim.x){
+        float4 x_data = x_vec[i];
+        float4 y_data = y_vec[i];
+        
+        x_data.x += y_data.x; x_data.y += y_data.y;
+        x_data.z += y_data.z; x_data.w += y_data.w;
+
+        x_vec[i] = x_data; // 原地更新残差
+        sum += (x_data.x * x_data.x + x_data.y * x_data.y + x_data.z * x_data.z + x_data.w * x_data.w);
+    }
+
+    __shared__ float s_warp_sums[32];
+    int lane = tid % 32;
+    int wid = tid / 32;
+
+    sum = warpReduceSum(sum);
+    if(lane == 0) s_warp_sums[wid] = sum;
+    __syncthreads();
+
+    // 修复：使用 blockDim.x 
+    sum = (tid < blockDim.x / 32) ? s_warp_sums[lane] : 0.0f;
+    if (wid == 0) sum = warpReduceSum(sum);
+
+    __shared__ float s_rms;
+    if(tid == 0) s_rms = rsqrtf(sum / dim + eps);
+    __syncthreads();
+
+    for(int i = tid; i < vec_dim; i += blockDim.x){
+        float4 x_data = x_vec[i];
+        float4 w_data = w_vec[i];
+        float4 o;
+        o.x = x_data.x * s_rms * w_data.x;
+        o.y = x_data.y * s_rms * w_data.y;
+        o.z = x_data.z * s_rms * w_data.z;
+        o.w = x_data.w * s_rms * w_data.w;
+        out_vec[i] = o;
+    }
+}
+
+// --- Fused Add + RMSNorm BF16 ---
+__global__ void fused_add_rms_norm_bf16(
+    __nv_bfloat16* residual, 
+    const __nv_bfloat16* input,
+    const __nv_bfloat16* weight,
+    __nv_bfloat16* output,
+    int dim,
+    float eps
+){
+    int block_idx = blockIdx.x;
+    int tid = threadIdx.x;
+
+    uint4* res_vec = (uint4*)(residual + block_idx * dim);
+    const uint4* x_vec = (const uint4*)(input + block_idx * dim);
+    const uint4* w_vec = (const uint4*)(weight);
+    uint4* out_vec = (uint4*)(output + block_idx * dim);
+
+    int vec_dim = dim / 8;
+    float sum_sq = 0.0f;
+
+    for (int i = tid; i < vec_dim; i += blockDim.x){
+        uint4 raw_res = res_vec[i];
+        uint4 raw_x = x_vec[i];
+        
+        __nv_bfloat162* bf2_res = reinterpret_cast<__nv_bfloat162*>(&raw_res);
+        __nv_bfloat162* bf2_x = reinterpret_cast<__nv_bfloat162*>(&raw_x);
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j){
+            bf2_res[j] = __hadd2(bf2_res[j], bf2_x[j]);
+            // 修复：__bfloat162float2 -> __bfloat1622float2
+            float2 f2 = __bfloat1622float2(bf2_res[j]);
+            sum_sq += f2.x * f2.x + f2.y * f2.y;
+        }
+        res_vec[i] = raw_res;
+    }
+
+    __shared__ float s_warp_sums[32];
+    int lane = tid % 32; int wid = tid / 32;
+    sum_sq = warpReduceSum(sum_sq);
+    if (lane == 0) s_warp_sums[wid] = sum_sq;
+    __syncthreads();
+    sum_sq = (tid < blockDim.x / 32) ? s_warp_sums[lane] : 0.0f;
+    if (wid == 0) sum_sq = warpReduceSum(sum_sq);
+
+    __shared__ float s_rms;
+    if (tid == 0) s_rms = rsqrtf(sum_sq / dim + eps);
+    __syncthreads();
+
+    for (int i = tid; i < vec_dim; i += blockDim.x){
+        uint4 raw_res = res_vec[i]; 
+        uint4 raw_w = w_vec[i];
+        __nv_bfloat162* bf2_res = reinterpret_cast<__nv_bfloat162*>(&raw_res);
+        __nv_bfloat162* bf2_w = reinterpret_cast<__nv_bfloat162*>(&raw_w);
+        
+        uint4 out_raw;
+        __nv_bfloat162* bf2_out = reinterpret_cast<__nv_bfloat162*>(&out_raw);
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j){
+            float2 f2_r = __bfloat1622float2(bf2_res[j]);
+            float2 f2_w = __bfloat1622float2(bf2_w[j]);
+            float2 f2_o;
+            f2_o.x = f2_r.x * s_rms * f2_w.x;
+            f2_o.y = f2_r.y * s_rms * f2_w.y;
+            bf2_out[j] = __float22bfloat162_rn(f2_o);
+        }
+        out_vec[i] = out_raw;
+    }
+}
+
+// Launch 函数
+void fused_add_rms_norm_fp32_launch(torch::Tensor x, torch::Tensor attn_output, torch::Tensor weight, torch::Tensor output, float eps){
+    int num_token = x.size(0);
+    int dim = x.size(1);
+    dim3 grid(num_token);
+    int threads = (dim / 4 <= 1024) ? (dim / 4) : 1024;
+    fused_add_rms_norm_fp32<<<grid, threads>>>(
+        x.data_ptr<float>(), attn_output.data_ptr<float>(), 
+        weight.data_ptr<float>(), output.data_ptr<float>(), dim, eps
+    );
+}
+
+void fused_add_rms_norm_bf16_launch(torch::Tensor x, torch::Tensor attn_output, torch::Tensor weight, torch::Tensor output, float eps){
+    int num_token = x.size(0);
+    int dim = x.size(1);
+    dim3 grid(num_token);
+    int threads = (dim / 8 <= 1024) ? (dim / 8) : 1024;
+    fused_add_rms_norm_bf16<<<grid, threads>>>(
+        (__nv_bfloat16*)x.data_ptr<at::BFloat16>(), (__nv_bfloat16*)attn_output.data_ptr<at::BFloat16>(),
+        (__nv_bfloat16*)weight.data_ptr<at::BFloat16>(), (__nv_bfloat16*)output.data_ptr<at::BFloat16>(), dim, eps
     );
 }
