@@ -116,11 +116,11 @@ class LlamaLayer(nn.Module):
     def forward(self, x, freqs_cis, mask=None, kv_cache=None, start_pos=0):
         # h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
         # out = h + self.mlp(self.ffn_norm(h))
-        with record_function("LlamaLayer_Total"):
-            # h = x + self.attention(self.attention_norm(x), freqs_cis, mask, kv_cache, start_pos)
+        with record_function("LlamaLayer_Optimized"):
             h_norm_1 = torch.empty_like(x)
-            custom_ops_cuda.rms_norm_fp16(x, self.attention_norm.weight, h_norm_1, self.attention_norm.eps)
+            custom_ops_cuda.rms_norm(x, self.attention_norm.weight, h_norm_1, self.attention_norm.eps)
             attn_out = self.attention(h_norm_1, freqs_cis, mask, kv_cache, start_pos)
+            # 注意：x 会在算子内部被原地更新为 x + attn_out
             h_norm_2 = torch.empty_like(x)
             custom_ops_cuda.fused_add_norm(x, attn_out, self.ffn_norm.weight, h_norm_2, self.ffn_norm.eps)
             mlp_out = self.mlp(h_norm_2)
