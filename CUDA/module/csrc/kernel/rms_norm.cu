@@ -180,7 +180,7 @@ __global__ void rms_norm_kernel_v4(
     if (lane == 0) s_warp_sums[wid] = sum;
     __syncthreads();
 
-    sum = (tid < 32) ? s_warp_sums[lane] : 0.0f;
+    sum = (tid < blockDim.x / 32) ? s_warp_sums[lane] : 0.0f;
     if (wid == 0) sum = warpReduceSum(sum);
 
     __shared__ float s_rms;
@@ -238,7 +238,7 @@ __global__ void rms_norm_kernel_v5(
     if (lane == 0) s_warp_sums[wid] = sum;
     __syncthreads();
 
-    sum = (tid < 32) ? s_warp_sums[lane] : 0.0f;
+    sum = (tid < blockDim.x / 32) ? s_warp_sums[lane] : 0.0f;
     if (wid == 0) sum = warpReduceSum(sum);
 
     __shared__ float s_rms;
