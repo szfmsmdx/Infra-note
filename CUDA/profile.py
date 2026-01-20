@@ -1,6 +1,6 @@
-from Tokenizer.BPE import BPE_Tokenizer
-from Config import LlamaConfig
-from Llama import LlamaGPT
+from test.model.Tokenizer.BPE import BPE_Tokenizer
+from test.model.Config import LlamaConfig
+from test.model.llama import LlamaGPT
 
 import torch
 import torch.nn as nn

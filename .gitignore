@@ -15,5 +15,7 @@
 
 # cuda
 **llama_profile
-**build
-**egg-info**
+**/build
+**.egg-info
+**nsys-rep
+**.sqlite

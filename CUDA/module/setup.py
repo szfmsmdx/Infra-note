@@ -12,6 +12,7 @@ setup(
             sources=[
                 'custom_ops.cpp',        # 桥梁文件
                 'csrc/kernel/rms_norm.cu',  # 具体的 Kernel 文件
+                'csrc/kernel/gemm.cu'
             ],
             # 如果你有头文件在 include 文件夹里，可以取消注释下面这行
             # include_dirs=[os.path.join(abs_path, 'csrc/include')],
