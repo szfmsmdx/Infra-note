@@ -14,11 +14,13 @@ __global__ void gemm_v1(
     if(row < m && col < n){
         float sum = 0.0f;
         for (int i = 0; i < k; ++i) {
-            sum += a[row * k + i] * b[col + i * n];
+            sum += a[row * k + i] * b[i * n + col];
         }
         c[row * n + col] = sum;
     }
 }
+
+__global__ void gemm_v2()
 
 void gemm_launch_fp32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     int m = a.size(0);
@@ -28,7 +30,7 @@ void gemm_launch_fp32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     // 定义二维 Block
     dim3 block(32, 32); 
     // 定义二维 Grid，确保覆盖 M 行 N 列
-    dim3 grid((m + block.x - 1) / block.x, (n + block.y - 1) / block.y);
+    dim3 grid((m + block.x - 1) / block.x, (n + block.y - 1) / block.y);    // x 负责行，y负责列
 
     gemm_v1<<<grid, block>>>(
         a.data_ptr<float>(),

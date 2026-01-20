@@ -1,6 +1,4 @@
 import torch
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
 torch.set_float32_matmul_precision('highest')
 import custom_ops_cuda  # your compiled extension
 import time
@@ -170,9 +168,9 @@ def run_benchmark(M: int, K: int, N: int, dtypes: list, impls: dict):
 # ----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=1024)
+    parser.add_argument("--M", type=int, default=2048)
     parser.add_argument("--K", type=int, default=4096)
-    parser.add_argument("--N", type=int, default=1024)
+    parser.add_argument("--N", type=int, default=2048)
     parser.add_argument("--dtypes", nargs="+", default=["fp32"], 
                         choices=["fp32", "fp16", "bf16"])
     args = parser.parse_args()
