@@ -16,7 +16,7 @@ def get_compiled_matmul(dtype: torch.dtype, shape_key: Tuple[Tuple[int, ...], Tu
         def _matmul(x, y):
             return torch.matmul(x, y)
         # Use reduce-overhead mode for small ops like GEMM
-        _COMPILED_FUNCTIONS[key] = torch.compile(_matmul, mode="reduce-overhead")
+        _COMPILED_FUNCTIONS[key] = torch.compile(_matmul, mode="reduce-overhead", backend="eager")
     return _COMPILED_FUNCTIONS[key]
 
 # ----------------------------
