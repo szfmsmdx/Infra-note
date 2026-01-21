@@ -19,3 +19,8 @@
 **.egg-info
 **nsys-rep
 **.sqlite
+
+#triton
+**main.exp
+**main.obj
+**main.lib
