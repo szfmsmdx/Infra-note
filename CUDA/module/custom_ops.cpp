@@ -12,7 +12,7 @@ void fused_add_rms_norm_bf16_launch(torch::Tensor x, torch::Tensor attn, torch::
 
 // gemm
 void gemm_launch_fp32(torch::Tensor a, torch::Tensor b, torch::Tensor c);
-
+void gemm_launch_tc_fp32(torch::Tensor a, torch::Tensor b, torch::Tensor c);
 
 // 统一桥接函数：智能分发类型
 void rms_norm_forward(torch::Tensor x, torch::Tensor weight, torch::Tensor out, float eps) {
@@ -37,8 +37,15 @@ void gemm_forward(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     gemm_launch_fp32(a, b, c);
 }
 
+void gemm_tc_forward(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
+    TORCH_CHECK(a.is_cuda(), "a must be a CUDA tensor");
+    TORCH_CHECK(b.is_cuda(), "b must be a CUDA tensor");
+    gemm_launch_tc_fp32(a, b, c);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("rms_norm", &rms_norm_forward, "RMSNorm Forward");
     m.def("fused_add_norm", &fused_add_rms_norm_forward, "Fused Add + RMSNorm Forward");
     m.def("gemm", &gemm_forward, "GEMM Forward");
+    m.def("gemm_tc", &gemm_tc_forward, "GEMM Tensor Core Forward");
 }

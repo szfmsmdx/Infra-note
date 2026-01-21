@@ -1,5 +1,4 @@
 import torch
-torch.set_float32_matmul_precision('highest')
 import custom_ops_cuda  # your compiled extension
 import time
 import argparse
@@ -16,7 +15,7 @@ def get_compiled_matmul(dtype: torch.dtype, shape_key: Tuple[Tuple[int, ...], Tu
         def _matmul(x, y):
             return torch.matmul(x, y)
         # Use reduce-overhead mode for small ops like GEMM
-        _COMPILED_FUNCTIONS[key] = torch.compile(_matmul, mode="reduce-overhead", backend="eager")
+        _COMPILED_FUNCTIONS[key] = torch.compile(_matmul, mode="reduce-overhead")
     return _COMPILED_FUNCTIONS[key]
 
 # ----------------------------
@@ -40,7 +39,7 @@ def run_custom_cuda(a: torch.Tensor, b: torch.Tensor, dtype: torch.dtype) -> tor
     c = torch.empty(a.size(0), b.size(1), device=a.device, dtype=dtype)
     
     if dtype == torch.float32:
-        custom_ops_cuda.gemm(a, b, c)  # assumes your binding exports 'gemm'
+        custom_ops_cuda.gemm_tc(a, b, c)  # assumes your binding exports 'gemm'
     elif dtype == torch.float16:
         raise NotImplementedError("FP16 kernel not implemented yet")
     elif dtype == torch.bfloat16:
@@ -168,9 +167,9 @@ def run_benchmark(M: int, K: int, N: int, dtypes: list, impls: dict):
 # ----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=2048)
+    parser.add_argument("--M", type=int, default=4096)
     parser.add_argument("--K", type=int, default=4096)
-    parser.add_argument("--N", type=int, default=2048)
+    parser.add_argument("--N", type=int, default=4096)
     parser.add_argument("--dtypes", nargs="+", default=["fp32"], 
                         choices=["fp32", "fp16", "bf16"])
     args = parser.parse_args()

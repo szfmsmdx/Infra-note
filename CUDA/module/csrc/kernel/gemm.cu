@@ -11,7 +11,7 @@ const int WMMA_K = 16;
 #define TILE_SIZE 32
 #define BM 128  // Block 处理 A 的行数
 #define BN 128  // Block 处理 B 的列数
-#define BK 8    // Block 每次 K 维度滑动的长度
+#define BK 16    // Block 每次 K 维度滑动的长度
 #define TM 8    // 每个线程处理 A 的行数
 #define TN 8    // 每个线程处理 B 的列数
 
@@ -120,8 +120,8 @@ __global__ void gemm_v3(
         
         // 步骤 A: 协作搬运 A 到 s_a [BM x BK] = [128 x 8]
         // 总共 1024 个元素，256 个线程，每人搬 4 个
-        for (int i = 0; i < 4; i++) {
-            int logic_id = tid * 4 + i;
+        for (int i = 0; i < 8; i++) {
+            int logic_id = tid * 8 + i;
             int row = logic_id / BK; // 0-127
             int col = logic_id % BK; // 0-7
             if ((by * BM + row) < m && (step + col) < k) {
@@ -133,8 +133,8 @@ __global__ void gemm_v3(
 
         // 步骤 B: 协作搬运 B 到 s_b [BK x BN] = [8 x 128]
         // 总共 1024 个元素，256 个线程，每人搬 4 个
-        for (int i = 0; i < 4; i++) {
-            int logic_id = tid * 4 + i;
+        for (int i = 0; i < 8; i++) {
+            int logic_id = tid * 8 + i;
             int row = logic_id / BN; // 0-7
             int col = logic_id % BN; // 0-127
             if ((step + row) < k && (bx * BN + col) < n) {
@@ -213,8 +213,8 @@ __global__ void gemm_v4(
 
     // --- 预加载第一块数据 (Stage 0) ---
     {
-        for (int i = 0; i < 4; i++) {
-            int logic_id = tid * 4 + i;
+        for (int i = 0; i < 8; i++) {
+            int logic_id = tid * 8 + i;
             s_a[0][logic_id / BK][logic_id % BK] = (by * BM + logic_id / BK < m && logic_id % BK < k) ? a[(by * BM + logic_id / BK) * k + logic_id % BK] : 0.0f;
             s_b[0][logic_id / BN][logic_id % BN] = (logic_id / BN < k && bx * BN + logic_id % BN < n) ? b[(logic_id / BN) * n + (bx * BN + logic_id % BN)] : 0.0f;
         }
@@ -228,8 +228,8 @@ __global__ void gemm_v4(
     for (int step = BK; step < k; step += BK) {
         
         // 步骤 A: 异步启动下一块数据的搬运 (搬到 write_stage)
-        for (int i = 0; i < 4; i++) {
-            int logic_id = tid * 4 + i;
+        for (int i = 0; i < 8; i++) {
+            int logic_id = tid * 8 + i;
             int row_a = logic_id / BK;
             int col_a = logic_id % BK;
             s_a[write_stage][row_a][col_a] = (by * BM + row_a < m && step + col_a < k) ? a[(by * BM + row_a) * k + (step + col_a)] : 0.0f;
@@ -282,19 +282,16 @@ __global__ void gemm_v5(
     float* __restrict__ c,
     int m, int n, int k
 ) {
-    // 1. 声明共享内存（使用 half 以匹配 Tensor Core 输入要求）
-    // 增加 +8 偏移量是为了消除 Bank Conflict (Bank 冲突)
+    // 1. 共享内存：增加 padding 彻底消除存储冲突
     __shared__ half s_a[BM][BK + 8];
-    __shared__ half s_b[BK][BN + 8];
+    __shared__ half s_b[BN][BK + 8]; // 存储 B 的转置以便于合并访存
 
-    // 2. 声明 WMMA 片段 (Fragments)
-    // 一个 Warp 负责 32x64 的结果区域，所以需要多个 fragment
-    // 这里的布局是：每个 Warp 处理 2x4 个 16x16 的片段
+    // 2. Fragment 定义
     wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frag[2];
-    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> b_frag[4];
+    wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag[4];
     wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag[2][4];
 
-    // 初始化所有累加器为 0
+    // 初始化累加器
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         for (int j = 0; j < 4; j++) {
@@ -302,74 +299,72 @@ __global__ void gemm_v5(
         }
     }
 
-    // 线程与 Warp 索引计算
-    int tid = threadIdx.y * blockDim.x + threadIdx.x; // 0-255
-    int warp_id = tid / 32; // 0-7
-    
-    // 计算当前 Warp 在 128x128 Block 内的起始位置
-    // 8个 Warp 按照 2x4 排列：每个 Warp 处理 64x32 的区域
-    int warp_row = (warp_id / 2) * 32; // 0, 32, 64, 96
-    int warp_col = (warp_id % 2) * 64; // 0, 64
+    int tid = threadIdx.y * blockDim.x + threadIdx.x; 
+    int warp_id = tid / 32;
+    int warp_row = (warp_id / 2) * 32; 
+    int warp_col = (warp_id % 2) * 64; 
 
-    // 主循环：沿 K 维度滑动
+    // 主循环
     for (int step = 0; step < k; step += BK) {
         
-        // --- 协作搬运 (Global -> Shared) ---
-        // 每个线程搬运数据并进行类型转换 (float -> half)
-        for (int i = 0; i < 16; i++) { // 256线程搬运 128*32=4096个元素，每人16个
-            int logic_id = tid * 16 + i;
+        // 协作搬运 (Global -> Shared)
+        // 这里的逻辑确保了访存对齐和合并
+        #pragma unroll
+        for (int i = 0; i < 8; i++) { 
+            int logic_id = tid * 8 + i; 
+            
             // 搬运 A
             int row_a = logic_id / BK;
             int col_a = logic_id % BK;
-            if ((blockIdx.y * BM + row_a) < m && (step + col_a) < k)
-                s_a[row_a][col_a] = __float2half(a[(blockIdx.y * BM + row_a) * k + (step + col_a)]);
+            int g_row_a = blockIdx.y * BM + row_a;
+            int g_col_a = step + col_a;
+            if (g_row_a < m && g_col_a < k)
+                s_a[row_a][col_a] = __float2half(a[g_row_a * k + g_col_a]);
             else
                 s_a[row_a][col_a] = __float2half(0.0f);
 
-            // 搬运 B
-            int row_b = logic_id / BN;
-            int col_b = logic_id % BN;
-            if ((step + row_b) < k && (blockIdx.x * BN + col_b) < n)
-                s_b[row_b][col_b] = __float2half(b[(step + row_b) * n + (blockIdx.x * BN + col_b)]);
+            // 搬运 B 并转置存储在 Shared Memory
+            int col_b_tile = logic_id % BN;
+            int row_b_tile = logic_id / BN;
+            int g_row_b = step + row_b_tile;
+            int g_col_b = blockIdx.x * BN + col_b_tile;
+            if (g_row_b < k && g_col_b < n)
+                s_b[col_b_tile][row_b_tile] = __float2half(b[g_row_b * n + g_col_b]);
             else
-                s_b[row_b][col_b] = __float2half(0.0f);
+                s_b[col_b_tile][row_b_tile] = __float2half(0.0f);
         }
 
-        __syncthreads();
+        __syncthreads(); // 确保搬运完成
 
-        // --- 核心计算：Warp 级 WMMA 操作 ---
+        // 计算 WMMA
         #pragma unroll
-        for (int k_idx = 0; k_idx < BK; k_idx += WMMA_K) {
-            // A 矩阵加载 (2个片段覆盖 Warp 的行)
-            wmma::load_matrix_sync(a_frag[0], (half*)&s_a[warp_row][k_idx], BK + 8);
-            wmma::load_matrix_sync(a_frag[1], (half*)&s_a[warp_row + 16][k_idx], BK + 8);
+        for (int i = 0; i < 2; i++) {
+            wmma::load_matrix_sync(a_frag[i], (half*)&s_a[warp_row + i * 16][0], BK + 8);
+        }
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            wmma::load_matrix_sync(b_frag[j], (half*)&s_b[warp_col + j * 16][0], BK + 8);
+        }
 
-            // B 矩阵加载 (4个片段覆盖 Warp 的列)
-            wmma::load_matrix_sync(b_frag[0], (half*)&s_b[k_idx][warp_col], BN + 8);
-            wmma::load_matrix_sync(b_frag[1], (half*)&s_b[k_idx][warp_col + 16], BN + 8);
-            wmma::load_matrix_sync(b_frag[2], (half*)&s_b[k_idx][warp_col + 32], BN + 8);
-            wmma::load_matrix_sync(b_frag[3], (half*)&s_b[k_idx][warp_col + 48], BN + 8);
-
-            // 执行矩阵乘加：acc = a * b + acc
+        #pragma unroll
+        for (int i = 0; i < 2; i++) {
             #pragma unroll
-            for (int i = 0; i < 2; i++) {
-                #pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    wmma::mma_sync(acc_frag[i][j], a_frag[i], b_frag[j], acc_frag[i][j]);
-                }
+            for (int j = 0; j < 4; j++) {
+                wmma::mma_sync(acc_frag[i][j], a_frag[i], b_frag[j], acc_frag[i][j]);
             }
         }
-        __syncthreads();
+
+        __syncthreads(); // 确保计算完成，才能加载下一块
     }
 
-    // 3. 写回结果 (从 Fragment 到显存)
+    // 3. 写回结果
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         #pragma unroll
         for (int j = 0; j < 4; j++) {
             int cur_row = blockIdx.y * BM + warp_row + i * 16;
             int cur_col = blockIdx.x * BN + warp_col + j * 16;
-            if (cur_row < m && cur_col < n) {
+            if (cur_row + 15 < m && cur_col + 15 < n) {
                 wmma::store_matrix_sync(&c[cur_row * n + cur_col], acc_frag[i][j], n, wmma::mem_row_major);
             }
         }
@@ -394,7 +389,7 @@ void gemm_launch_fp32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     );
 }
 
-void gemm_launch_v5_fp32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
+void gemm_launch_tc_fp32(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     int m = a.size(0);
     int k = a.size(1);
     int n = b.size(1);
