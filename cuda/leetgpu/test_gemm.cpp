@@ -37,9 +37,9 @@ void cpu_gemm(
 }
 
 int main() {
-    int M = 1024;
-    int N = 1024;
-    int K = 1024;
+    int M = 2048;
+    int N = 2048;
+    int K = 2048;
 
     std::cout << "Testing GEMM: "
               << "M=" << M
