@@ -17,6 +17,12 @@
 3. SIMT 执行：
     - 当执行 `r_c[i][j] += r_a[i] * r_b[j]` 时，Warp 里的 32 个线程同时执行这条指令，但操作不同的寄存器数据。这就是 SIMT (Single Instruction, Multiple Threads)。
 
+| **层级**            | **操作主体**             | **单位**    | **关键点**            |
+| ----------------- | -------------------- | --------- | ------------------ |
+| **发射 (Launch)**   | CPU (Driver)         | **Grid**  | 整个任务的边界            |
+| **调度 (Schedule)** | GPU Global Scheduler | **Block** | 决定哪个 SM 负责哪个块      |
+| **执行 (Execute)**  | SM Warp Scheduler    | **Warp**  | 真正占用 CUDA Core 的瞬间 |
+
 # 2. 超参数如何设置？（以GridDim和BlockDim为例）
 
 GridDim、BlockDim的设计原则：

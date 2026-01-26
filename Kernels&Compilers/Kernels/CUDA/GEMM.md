@@ -33,3 +33,59 @@ __global__ void gemm_v1(
 9. 如果把 x 分配给B，是连续的，没问题 
 10. 在 9 的情况下，再看 A，A拿到的是y，在B多线程的时候A是不变的，他会被warp内广播，所以访存不变
 
+还有个更简单的思路是：
+- C的列存储更为高效
+
+那么这里把 block size 设置为分块的 tile size，可以得到一版代码：
+```cpp
+__global__ void matrix_multiplication_kernel_v2(
+const float* A,
+const float* B,
+float* C,
+int M, int N, int K
+) {
+	__shared__ float a[TILE_SIZE][TILE_SIZE];
+	__shared__ float b[TILE_SIZE][TILE_SIZE];
+	
+	
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+	int row = blockIdx.y * TILE_SIZE + ty;
+	int col = blockIdx.x * TILE_SIZE + tx;
+	
+	float sum = 0.0f;
+	// 遍历 K 维度的 tile
+	for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+	// A tile: [row, t * TILE_SIZE + tx]
+		if (row < M && (t * TILE_SIZE + tx) < K) {
+			a[ty][tx] = A[row * K + (t * TILE_SIZE + tx)];
+		} else {
+			a[ty][tx] = 0.0f;
+	}
+	
+	// B tile: [t * TILE_SIZE + ty, col]
+	if (col < N && (t * TILE_SIZE + ty) < K) {
+		b[ty][tx] = B[(t * TILE_SIZE + ty) * N + col];
+	} else {
+		b[ty][tx] = 0.0f;
+	}
+	
+	__syncthreads();
+	
+	#pragma unroll
+	for (int k = 0; k < TILE_SIZE; ++k) {
+		sum += a[ty][k] * b[k][tx];
+	}
+	
+	__syncthreads();
+	}
+	
+	if (row < M && col < N) {
+		C[row * N + col] = sum;
+	}
+}
+```
+
+# v3
+
+v2 版本使用了 share mem 来优化访存读写，但实际上取一次 share mem只做了一次计算，强度太低了
