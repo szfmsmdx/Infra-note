@@ -1,2 +1,42 @@
-- [ ] nano vllm
-- [ ] 
+- [ ] 深入 GPU 架构，撰写笔记
+	- [ ] 架构： https://zhuanlan.zhihu.com/p/545056819
+	- [ ] 工作原理、流程： https://zhuanlan.zhihu.com/p/610912368
+	- [ ] 算子访存问题（GEMM v4）： https://zhuanlan.zhihu.com/p/11132414477
+	- [ ] 异步拷贝与流水线（GEMM v5）
+	- [ ] Tensor Core
+	- [ ] CUDA Graph
+- [ ] CUDA调优
+	- [ ] nsys
+	- [ ] ncu
+	- [ ] 能看懂 GUI
+- [ ] 推理框架手搓
+	- [ ] PageAttention kernel 算子实现
+	- [ ] 算子量化开发
+		- [ ] W8A8、W4A16 AWQ、GPTQ的GEMM算子
+			- [ ] bit packing
+			- [ ] De quantization
+	- [ ] mini SGL
+- [ ] 分布式推理
+	- [ ] 常见并行策略
+		- [ ] TP
+		- [ ] EP
+		- [ ] DP
+		- [ ] PP
+	- [ ] 通信原语
+		- [ ] AllReduce
+		- [ ] AllGather
+		- [ ] ReduceScatter
+	- [ ] 多线程、多进程通信手搓
+	- [ ] https://www.cnblogs.com/crazymakercircle/p/19239139#autoid-h4-1-7-0
+- [ ] CPP基础
+	- [ ] 内存管理
+	- [ ] 面相对象
+	- [ ] C++新特性
+		- [ ] cpp11
+		- [ ] cpp14
+		- [ ] cpp17
+- [ ] LeetCode Hot 100
+- [ ] Leetgpu 常见算子
+- [ ] nano-vllm
+	- [ ] chunk prefill
+	- [ ] pd分离
