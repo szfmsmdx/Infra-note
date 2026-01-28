@@ -271,7 +271,6 @@ extern "C" void solve(
     );
 }
 
-
 extern "C" void solve_v3(
     const float* A,
     const float* B,
