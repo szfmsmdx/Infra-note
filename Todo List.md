@@ -26,8 +26,7 @@
 		- [ ] AllReduce
 		- [ ] AllGather
 		- [ ] ReduceScatter
-	- [ ] 多线程、多进程通信手搓
-	- [ ] https://www.cnblogs.com/crazymakercircle/p/19239139#autoid-h4-1-7-0
+	- [x] 多线程、多进程概念及通信
 - [ ] CPP基础
 	- [ ] 内存管理
 	- [ ] 面相对象
