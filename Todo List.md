@@ -9,7 +9,7 @@
 	- [ ] nsys
 	- [ ] ncu
 	- [ ] 能看懂 GUI
-- [ ] 推理框架手搓
+- [ ] kernel
 	- [ ] PageAttention kernel 算子实现
 	- [ ] 算子量化开发
 		- [ ] W8A8、W4A16 AWQ、GPTQ的GEMM算子
@@ -22,10 +22,10 @@
 		- [ ] EP
 		- [ ] DP
 		- [ ] PP
-	- [ ] 通信原语
-		- [ ] AllReduce
-		- [ ] AllGather
-		- [ ] ReduceScatter
+	- [ ] 实验
+		- [x] DP
+		- [ ] DDP
+		- [ ] FSDP
 	- [x] 多线程、多进程概念及通信
 - [ ] CPP基础
 	- [ ] 内存管理
@@ -34,6 +34,9 @@
 		- [ ] cpp11
 		- [ ] cpp14
 		- [ ] cpp17
+- [ ] python 基础
+	- [ ] 魔术方法
+	- [ ] 装饰器
 - [ ] LeetCode Hot 100
 - [ ] Leetgpu 常见算子
 - [ ] nano-vllm
