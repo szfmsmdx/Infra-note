@@ -1,0 +1,1 @@
+OMP_NUM_THREADS=1 torchrun --nproc_per_node=2 --master_port=29501 recv.py

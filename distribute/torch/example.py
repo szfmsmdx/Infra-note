@@ -1,37 +1,54 @@
 import os
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
+# # 自己用 mp 来创建进程，直接 python 启动即可
+# def worker(rank, world_size):
+#     dist.init_process_group(
+#         backend="nccl",
+#         init_method="tcp://localhost:29501",
+#         rank=rank,
+#         world_size=world_size
+#     )
+#     # 一个进程一张卡
+#     torch.cuda.set_device(rank)
+
+#     x = torch.tensor([rank], device="cuda", dtype=torch.float32)
+#     dist.all_reduce(x, op=dist.ReduceOp.SUM)
+#     dist.barrier()  # 进程同步
+#     if rank == 0:
+#         print(f"world_size = {world_size}")
+#     print(f"rank {rank}: after all_reduce, x = {x.item()}")
+
+#     dist.destroy_process_group()
+    
+# if __name__ == "__main__":
+#     world_size = 4
+#     mp.set_start_method("spawn", force=True)
+#     mp.spawn(
+#         worker, args=(world_size,), # 等价于 args=(local_rank, *args)，第一个参数强制传入local_rank
+#         nprocs=4, 
+#         join=True
+#     )
+
+# 用 torchrun 这个 launcher 来自动启动
 def main():
-    # 1. 初始化进程组
     dist.init_process_group(
-        backend="nccl",      # 通信后端
-        init_method="env://",# 初始化方式, 让 torch 去环境变量里面读
+        backend="nccl",
+        init_method="env://"
     )
-
-    # 2. 获取当前进程的“身份”
-    rank = dist.get_rank()          # 当前进程编号
-    world_size = dist.get_world_size()  # 总进程数
-    local_rank = int(os.environ["LOCAL_RANK"])
-
-    # 3. 绑定当前进程使用的 GPU
+    rank = dist.get_rank()  # 这个是全局进程编号，相对于分布式作业来说
+    world_size = dist.get_world_size()
+    local_rank = int(os.environ["LOCAL_RANK"])  # 这个是本机 GPU 编号，在当前机器内唯一
     torch.cuda.set_device(local_rank)
-
-    # 4. 构造一个张量（每个 rank 初始值不同）
-    x = torch.tensor([rank], device="cuda", dtype=torch.float32)
-
-    # 5. All-Reduce：所有进程一起做规约
+    x = torch.tensor([rank], dtype=torch.float32, device="cuda")
     dist.all_reduce(x, op=dist.ReduceOp.SUM)
-
-    # 6. Barrier：全局同步
     dist.barrier()
-
     if rank == 0:
         print(f"world_size = {world_size}")
+    print(f"rank {rank}: after all reduce, x = {x.item()}")
 
-    print(f"rank {rank}: after all_reduce, x = {x.item()}")
-
-    # 7. 销毁进程组
     dist.destroy_process_group()
 
 if __name__ == "__main__":

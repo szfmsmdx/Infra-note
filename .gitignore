@@ -24,3 +24,6 @@
 **main.exp
 **main.obj
 **main.lib
+
+# dist data
+**/data/

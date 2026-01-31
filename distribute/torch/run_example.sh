@@ -1,0 +1,1 @@
+OMP_NUM_THREADS=2 torchrun --nproc_per_node=4 --master_port=29501 example.py
