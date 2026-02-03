@@ -29,7 +29,22 @@ using namespace std;
 class Solution {
 public:
     unordered_map<long long, int> prefix;
+    int dfs(TreeNode* root, long cur, int targetSum){
+        if(!root) return 0;
+
+        cur += root->val;
+        int res = 0;
+        if(prefix.count(cur - targetSum)){
+            res = prefix[cur - targetSum];
+        }
+        prefix[cur] ++; // 使用该节点
+        res += dfs(root->left, cur, targetSum);
+        res += dfs(root->right, cur, targetSum);
+        prefix[cur] --; // 退出该节点
+        return res;
+    }
     int pathSum(TreeNode* root, int targetSum) {
-        
+        prefix[0] = 1;  // 处理空路径，比如 root 自己就满足
+        return dfs(root, 0, targetSum);
     }
 };
