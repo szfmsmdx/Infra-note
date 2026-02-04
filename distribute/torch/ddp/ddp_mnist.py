@@ -1,63 +1,66 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+import os
 
-# 1. 定义一个非常轻量的 CNN (适合 4GB 显存)
+# 定义一个简单 CNN 模型
 class TinyCNN(nn.Module):
     def __init__(self):
         super(TinyCNN, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, 16, 3), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, 3), nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
-        self.fc = nn.Linear(32 * 5 * 5, 10)
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3)
+        self.fc1 = nn.Linear(32 * 26 * 26, 128)
+        self.fc2 = nn.Linear(128, 10)
 
     def forward(self, x):
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
+        x = torch.relu(self.conv1(x))
+        x = x.view(-1, 32 * 26 * 26)
+        x = torch.relu(self.fc1(x))
+        return self.fc2(x)
 
 def train():
-    # 2. 设置单进程可见的卡（比如你有 4 张，我们用 0,1,2,3）
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # 准备数据 (MNIST)
+    # 1. 初始化分布式环境
+    dist.init_process_group(backend='nccl')  # NCCL for CUDA
+    rank = dist.get_rank()  # 当前进程的 rank (0 ~ world_size-1)
+    world_size = dist.get_world_size()  # 总进程数（GPU 数）
+    device = torch.device(f"cuda:{rank}")  # 每个进程绑定一个 GPU
+
+    if rank == 0:
+        print(f"启动 DDP，world_size={world_size}")
+
+    # 2. 准备数据
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
-    # DP 的 Batch Size 是分配到所有卡上的，所以可以设大一点
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    train_dataset = datasets.MNIST('/data3/szf/Infra-note/distribute/torch/data', train=True, download=True, transform=transform)
+    
+    # 使用 DistributedSampler 分担数据
+    sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    train_loader = DataLoader(train_dataset, batch_size=64, sampler=sampler, num_workers=2)  # batch_size 是 per-GPU
 
+    # 3. 模型、优化器、损失
     model = TinyCNN().to(device)
-
-    # 3. 核心：使用 DataParallel 包装模型
-    if torch.cuda.device_count() > 1:
-        print(f"检测到 {torch.cuda.device_count()} 张显卡，开启 DP 模式...")
-        # device_ids 默认为所有可见卡
-        model = nn.DataParallel(model)
-
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    ddp_model = DDP(model, device_ids=[rank])  # 包装为 DDP
+    optimizer = optim.Adam(ddp_model.parameters(), lr=0.01)
     criterion = nn.CrossEntropyLoss()
 
-    model.train()
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, target)
-        loss.backward()
-        optimizer.step()
+    # 4. 训练循环
+    ddp_model.train()
+    for epoch in range(2):  # 简单跑 2 个 epoch
+        sampler.set_epoch(epoch)  # 确保 shuffle 一致
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            output = ddp_model(data)
+            loss = criterion(output, target)
+            loss.backward()  # 这里触发梯度同步
+            optimizer.step()
+            if rank == 0 and batch_idx % 10 == 0:  # 只在 rank 0 打印
+                print(f"Epoch {epoch}, Batch {batch_idx}: Loss = {loss.item():.4f}")
 
-        if batch_idx % 10 == 0:
-            # 注意：使用了 DataParallel 后，原始模型在 model.module 中
-            print(f"Batch {batch_idx}: Loss = {loss.item():.4f}")
-            if batch_idx > 50: break # 演示用，跑 50 个 batch 就停
-
-    print("DP 训练演示完成！")
+    # 5. 清理
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     train()

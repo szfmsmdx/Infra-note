@@ -27,7 +27,7 @@ def train():
     
     # 准备数据 (MNIST)
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+    train_dataset = datasets.MNIST('/data3/szf/Infra-note/distribute/torch/data', train=True, download=True, transform=transform)
     # DP 的 Batch Size 是分配到所有卡上的，所以可以设大一点
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
 
