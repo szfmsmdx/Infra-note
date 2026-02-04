@@ -1,7 +1,6 @@
 >参考文章：
 >[(6 封私信) PyTorch分布式训练基础：掌握torch.distributed及其通信功能 - 知乎](https://zhuanlan.zhihu.com/p/692668388)
 >[分布式通信包 - torch.distributed — PyTorch 2.9 文档 - PyTorch 文档](https://docs.pytorch.ac.cn/docs/stable/distributed.html#backends)
->
 
 # 入门
 ## 多线程创建
@@ -192,7 +191,7 @@ DP的工作流如下：
 1. 主设备（通常是 cuda:0）持有原始模型副本
 2. 输入一个 batch（如 256 张图）
 3. 将 batch 拆成 2 份（每份 128 张），分别发送到 GPU 0 和 GPU 1
-4. 在每张卡上复制一份完整的模型（是的，模型被复制了！）
+4. 在每张卡上复制一份完整的模型
 5. 每张卡独立做：
     - 前向传播 → 得到 loss
     - 反向传播 → 计算梯度
@@ -203,6 +202,164 @@ DP的工作流如下：
 
 DP 到其他卡上的相当于是工作副本，被 DP 包裹的 model 在计算损失的时候汇总到主卡，并 backward 的时候会回传梯度求平均，然后分发到副卡更新权重，最终的model也是取主卡上的
 
+## DP的通信
+
+DP的通信不走 NCCL，NCCL是专门为了多GPU集体通信的高性能库，DP更多的是采用类似 Tensor.copy_()、torch.cat() 之类的操作完成的隐式通信，底层依赖 CUDA 的点对点（P2P）内存拷贝比如（cudaMemcpyPeer），可能走NVLink 或者 PCIe
+
+### 通信路径
+
+当 DP 执行如下操作时：
+```python
+# 假设 input 分成 chunks，发往不同 GPU
+replicas = replicate(module, device_ids)      # 复制模型
+scattered = scatter(input, device_ids)        # 分发输入
+outputs = parallel_apply(replicas, scattered, ...)  # 并行前向
+gathered = gather(outputs, output_device=0)   # 收集输出到主卡
+```
+
+其中 `scatter` 和 `gather` 的核心是：
+
+- 调用 `tensor.to(target_device)` → 触发 GPU 间内存拷贝
+- 如果系统支持 CUDA P2P（Peer Access），PyTorch 会使用 `cudaMemcpyPeerAsync`
+    - 这时数据可直接通过 NVLink（如果硬件支持）或 PCIe 传输
+    - 无需经过主机内存（zero-copy）
+
+(检查是否启用 P2P)
+```python
+import torch 
+print(torch.cuda.can_device_access_peer(0, 1)) # GPU0 能否直连 GPU1？
+```
+
+怎么看 DP 的具体通信方式呢？
+- `nvidia-smi topo -m` 
+	- 输出中 GPU 之间标记为 NV1 / NV2 -> 支持 NVLink
+	- 标记为 PIX -> 通过 PCIe 连接
+- nsys 抓取：`nsys profile -t cuda,nvtx python train.py` 
+	- 在 `.qdrep` 文件中有 `cudaMemcpyPeer`  表示 DP 在做 GPU 间的显存拷贝（P2P）
+	- 看不到 nccl* 证明没用 nccl（DP不支持初始化group肯定用不到 nccl）
+
+#### P2P
+CUDA 的 P2P 允许：
+- GPU 之间相互读写显存
+- 无需经过 host mem 中转
+- 底层通过 NVLink 或 PCIe 传输数据
+
+
 # DDP
+>参考文章：
+>[(5 封私信 / 2 条消息) [原创][深度][PyTorch] DDP系列第一篇：入门教程 - 知乎](https://zhuanlan.zhihu.com/p/178402798)
+>[(5 封私信 / 2 条消息) [原创][深度][PyTorch] DDP系列第二篇：实现原理与源代码解析 - 知乎](https://zhuanlan.zhihu.com/p/187610959)
+>[(5 封私信 / 2 条消息) [原创][深度][PyTorch] DDP系列第三篇：实战与技巧 - 知乎](https://zhuanlan.zhihu.com/p/250471767)
+>
+
+
+首先说一下DDP和DP的区别
+
+| 维度   | DP                                      | DDP                                       |
+| ---- | --------------------------------------- | ----------------------------------------- |
+| 进程模型 | 单进程多线程                                  | 多进程（每个 GPU 一个进程）                          |
+| 通信方式 | 主 GPU 汇总梯度（Gather → Reduce → Broadcast） | All-Reduce（点对点高效同步）                       |
+| 扩展性  | 仅限单机                                    | 支持多机多卡                                    |
+| 性能   | 较差（主 GPU 成瓶颈，受 GIL 限制）                  | 更高（负载均衡，无 GIL 限制）                         |
+| 内存使用 | 主 GPU 内存压力大                             | 各 GPU 负载均衡                                |
+| 代码改动 | 极简（一行 `DataParallel`）                   | 较复杂（需初始化进程组、Sampler、启动方式等）                |
+| 启动方式 | 直接 `python train.py`                    | 需用 `torchrun --nproc_per_node=N train.py` |
+
+## Ring-Reduce
+
+![[Ring-Reduce.png]]
+
+可以看到：
+- 各**进程**独立计算梯度。
+- 每个进程将梯度依次传递给下一个进程，之后再把从上一个进程拿到的梯度传递给下一个进程。循环n次（进程数量）之后，所有进程就可以得到全部的梯度了。
+- 每个进程只跟自己上下游两个进程进行通讯，极大地缓解了参数服务器的通讯阻塞现象
+
+### DDP官方实践
+
+DDP官方的最佳实践是每张卡对应一个单独的GPU模型（即一个进程），那比如两个机子，每个机子八张卡，并行数就是 2x8=16，当然我们也可以给每个进程多张卡，总的来说有几种情况：
+1. 每个进程一张卡。这是DDP的最佳使用方法。
+2. 每个进程多张卡，复制模式。一个模型复制在不同卡上面，每个进程都实质等同于DP模式。这样做是能跑得通的，但是，速度不如上一种方法，一般不采用。
+3. 每个进程多张卡，并行模式。一个模型的不同部分分布在不同的卡上面。例如，网络的前半部分在0号卡上，后半部分在1号卡上。这种场景，一般是因为我们的模型非常大，大到一张卡都塞不下batch size = 1的一个模型。
+
+## DistributedSampler
+
+这是 DDP 专用的 dataloader，我们先用一段代码来看 DP 和 DDP 的调用区别
+### DP example
+```python
+def train():
+    # 2. 设置单进程可见的卡（比如你有 4 张，我们用 0,1,2,3）
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 准备数据 (MNIST)
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
+    train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+    # DP 的 Batch Size 是分配到所有卡上的，所以可以设大一点
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+
+    model = TinyCNN().to(device)
+
+    # 3. 核心：使用 DataParallel 包装模型
+    if torch.cuda.device_count() > 1:
+        print(f"检测到 {torch.cuda.device_count()} 张显卡，开启 DP 模式...")
+        # device_ids 默认为所有可见卡
+        model = nn.DataParallel(model)
+
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    criterion = nn.CrossEntropyLoss()
+
+    model.train()
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+
+        if batch_idx % 10 == 0:
+            # 注意：使用了 DataParallel 后，原始模型在 model.module 中
+            print(f"Batch {batch_idx}: Loss = {loss.item():.4f}")
+            if batch_idx > 50: break # 演示用，跑 50 个 batch 就停
+
+    print("DP 训练演示完成！")
+```
+
+这里的流程是：
+- train_loader = DataLoader(...) 是懒启动，在具体 for 的时候才从磁盘加载数据
+	- 读取过程主要是通过 CPU 加载，如果 num_workers > 0 那么通过异步去读取，然后通过 to 拿到主GPU上
+- 主GPU接收到完整 batch Tensor后自动 scatter 这个大 Tensor 到所有 GPU 上
+
+### DDP example
+
+对比 DP，DDP 的例子如下：
+```python
+my_trainset = torchvision.datasets.CIFAR10(root='./data', train=True)
+# 新增1：使用DistributedSampler，DDP帮我们把细节都封装起来了。用，就完事儿！
+#       sampler的原理，后面也会介绍。
+train_sampler = torch.utils.data.distributed.DistributedSampler(my_trainset)
+# 需要注意的是，这里的batch_size指的是每个进程下的batch_size。也就是说，总batch_size是这里的batch_size再乘以并行数(world_size)。
+trainloader = torch.utils.data.DataLoader(my_trainset, batch_size=batch_size, sampler=train_sampler)
+
+
+for epoch in range(num_epochs):
+    # 新增2：设置sampler的epoch，DistributedSampler需要这个来维持各个进程之间的相同随机数种子
+    trainloader.sampler.set_epoch(epoch)
+    # 后面这部分，则与原来完全一致了。
+    for data, label in trainloader:
+        prediction = model(data)
+        loss = loss_fn(prediction, label)
+        loss.backward()
+        optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
+        optimizer.step()
+```
+
+这里由于 DDP 是多进程的，所以流程如下：
+- 创建train_dataset：只是初始化 dataset 对象，没有涉及到具体读取的过程
+- 创建采样器 train_sampler：DistributedSampler 根据当前进程的rank自动划分数据集，此时也没有开始读取数据只是生成了索引表
+- 创建 dataloader，这时这里的 batch size 是这个进程的 batch size，或者直接记忆 DataLoader 的 batch size是针对进程而言的
+- for epoch 里面，真正开始读取 trainloader 的时候每个 GPU 开始读他的 batch，这时 num_workers > 0 的话，多线程异步读取可以进一步进行加速
+
+所以其实 DDP 可以理解为 DP 的 plus 版本，具体的训练思路都是差不多的
 
 # FSDP
