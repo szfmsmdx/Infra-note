@@ -362,4 +362,38 @@ for epoch in range(num_epochs):
 
 所以其实 DDP 可以理解为 DP 的 plus 版本，具体的训练思路都是差不多的
 
+## DDP 实现
+### 准备
+
+首先，DDP 分发模型到不同的机器（进程上）需要我们了解模型的大致构成，一个 nn.module 的属性大概可以分为两组，主要掌握这四个东西：
+- self.training：模型是否在训练状态
+- self.\_modules：模型的下属模块，类似于迭代地定义了self.training、self.\_modules 等内容
+- self.\_parameters：模型的参数，默认 require_gridiant=True
+- self.\_buffers：模型的缓冲区，与参数不同的是默认 require_gridiant=False，通常用来保存不需要梯度，但又作为模型状态的一部分存储的张量
+
+所以，在网络开始前向传递之前，由一个比如cuda：0节点会把模型的buffer广播给其他节点以维护状态的统一
+
+### 实现思路
+
+大体的实现思路是通过 hook 来实现的，也就是说，DDP的梯度更新策略可以理解为：给某个阶段的参数打上了 backward hook，那么当反向传播时，触发到这个参数的梯度更新时，就开始执行 RingAllReduce策略进行梯度的节点之间的更新操作
+
+### 执行流程
+#### 初始化阶段
+1. 准备进程通信组，建立连接，注意如果参与链接的进程不够进程组的大小，那么所有进程会卡在这一步，一直到进程数够进程组的大小
+2. DDP 初始化： model = DDP(model) 
+	1. 把 parameters、buffers 从 master 节点传到其他节点（master节点其实不是特别合适因为 DDP 是去中心化的，但是意思是这么个意思）
+	2. 如果一个节点有多张卡那么每张卡也创建模型，总而言之是以进程为单位的创建
+	3. parameters 进行分组，每个组称为一个 bucket，临近的parameter会被分到同一个 bucket
+		1. 为了加速，在梯度通讯时先计算，得到梯度的 bucket 会立即通讯，而不是等梯度算完再通信，算是 overlap
+	4. 创建管理器 reducer，给每个 parameter 注册 hook
+	5. 为 sync_batchnorm做准备
+
+
+#### 训练阶段
+
+![[DDP Train.png]]
+
+
+
+
 # FSDP
