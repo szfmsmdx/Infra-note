@@ -384,7 +384,7 @@ for epoch in range(num_epochs):
 	1. 把 parameters、buffers 从 master 节点传到其他节点（master节点其实不是特别合适因为 DDP 是去中心化的，但是意思是这么个意思）
 	2. 如果一个节点有多张卡那么每张卡也创建模型，总而言之是以进程为单位的创建
 	3. parameters 进行分组，每个组称为一个 bucket，临近的parameter会被分到同一个 bucket
-		1. 为了加速，在梯度通讯时先计算，得到梯度的 bucket 会立即通讯，而不是等梯度算完再通信，算是 overlap
+		1. 为了加速，在梯度通讯时先计算，得到梯度的 bucket 会立即通讯，而不是等梯度算完再通信，算是 overlap，感觉类似于 PP 那种
 	4. 创建管理器 reducer，给每个 parameter 注册 hook
 	5. 为 sync_batchnorm做准备
 
@@ -392,6 +392,100 @@ for epoch in range(num_epochs):
 #### 训练阶段
 
 ![[DDP Train.png]]
+
+训练阶段 DDP 主要干这几件事：
+1. 采样数据：从 DataLoader 中读取一个 batch 的数据
+2. 进行网络前向传播
+	1. 状态同步
+		1. （可能）如果一个进程分配到了多卡，那么首先进程内部的多卡需要同步一下parameter 和 buffer
+		2. 同步进程之间的 buffer 
+	2. 前向计算
+	3. （可能）DDP 是默认所有参数都有梯度用于同步的，如果前向的过程中有些参数没有参与梯度计算的话，那么反向传播就不会为他计算梯度，就没有梯度用于传播，那么 DDP 会报错。 `find_unused_parameters=True` 这个参数的作用是让 DDP 在前向完成过后遍历计算图检查那些参数没有用于产生最终的 loss，对于这些参数提前标记为 ready（认为他们梯度同步已经完成从而跳过同步过程）
+3. 计算梯度
+	1. 各进程计算自己的梯度（reducer外）
+	2. 某个parameter的梯度计算好了之后，先前这个 parameter 注册的 grad hook会被触发，在 reducer 里面把这个 parameter 的状态标记为 ready（reducer 外）
+	3. 某个 bucket 的 parameter 都是 ready 状态的时候，reducer 对这个桶的所有参数进行异步的 all reduce 操作（reducer内部）
+		1. 由于 bucket 的执行顺序是和梯度计算的顺序类似，所以我们在注册 parameter（搭建网络）的过程中就应该按照前向计算的顺序去搭建
+	4. 当所有bucket的梯度都平均结束后，reducer才会把得到的平均梯度结果写到parameter.grad里面
+4. 优化器应用梯度更新参数
+	1. 之所以优化器更新参数能保持一致是因为：
+		1. 各优化器初始状态相同
+		2. 模型初始参数相同
+		3. 优化器每个 step 的状态相同
+		4. 所以需要先 DDP(model) 再去注册优化器
+
+
+### SyncBN
+直接在 DP 中的 BN 就是原始的 BN，每个线程进行自己样本的 BN 计算，其实这样会导致误差，在模型比较大、样本量稍微小一点的环境下，这样会导致严重的误差
+
+SyncBN 的出现就是为了解决这个问题，他利用通讯接口在各个进程之间做了通讯以同步信息，具体流程为：
+1. forward
+	1. 每个进程计算自己的 batch mean 和 batch variance
+	2. 每个进程对自己的 mean 和 var 进行 all gather得到全局量
+	3. 每个进程计算总体的 mean 和总体的 var
+	4. 进行正常的 BN 计算
+2. backward
+	1. 和正常一样
+
+#### 使用 
+```python
+# DDP init
+dist.init_process_group(backend='nccl')
+
+# 按照原来的方式定义模型，这里的BN都使用普通BN就行了。
+model = MyModel()
+# 引入SyncBN，这句代码，会将普通BN替换成SyncBN。
+model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
+
+# 构造DDP模型
+model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+```
+
+注意这里 `convert_sync_batchnorm` 针对的 module 必须继承自 \_BachNorm 类，如果是自定义的 module 是不可以的
+
+
+### 梯度累计的效率问题
+
+首先，梯度累计是在一个 gradient for 中先不着急进行优化器的 step 更新操作，而是进行梯度累积后再进行 step 更新操作：
+```python
+for i, (image, label) in enumerate(train_loader): 
+	# 1. forward 
+	pred = model(image) loss = criterion(pred, label) 
+	# 2. backward
+	loss = loss / accumulation_steps 
+	loss.backward() 
+	# 3. update parameters of net 
+	if (i + 1) % accumulation_steps == 0: 
+		# 4.1 update parameters of net 
+		optimizer.step() 
+		# 4.2 reset gradient 
+		optimizer.zero_grad()
+```
+
+
+这其实相当于变相增大了 batch size，累计了几个batch的梯度进行后再进行更新
+那么把这套操作应用在 DDP 上是否可行呢？其实是有一些问题的，我们知道，当我们计算得出 loss 的时候，在 backward 的时候会进行梯度的 all reduce 更新，但实际上我们只需要最后一次进行 all reduce 更新即可，所以可以优化中间不必要的通信时间，在代码上，DDP 提供了 `no_sync` 函数来取消梯度同步
+
+```python
+from contextlib import nullcontext
+# 如果你的python版本小于3.7，请注释掉上面一行，使用下面这个：
+# from contextlib import suppress as nullcontext
+
+if local_rank != -1:
+    model = DDP(model)
+
+optimizer.zero_grad()
+for i, (data, label) in enumerate(dataloader):
+    # 只在DDP模式下，轮数不是K整数倍的时候使用no_sync
+    my_context = model.no_sync if local_rank != -1 and i % K != 0 else nullcontext
+    with my_context():
+        prediction = model(data)
+        loss = loss_fn(prediction, label) / K
+        loss.backward()  # 积累梯度，不应用梯度改变
+    if i % K == 0:
+        optimizer.step()
+        optimizer.zero_grad()
+```
 
 
 
