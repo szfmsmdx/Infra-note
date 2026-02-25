@@ -39,6 +39,6 @@
 	- [ ] 装饰器
 - [ ] LeetCode Hot 100
 - [ ] Leetgpu 常见算子
-- [ ] nano-vllm
-	- [ ] chunk prefill
-	- [ ] pd分离
+- [x] nano-vllm
+	- [x] chunk prefill
+	- [x] pd分离
