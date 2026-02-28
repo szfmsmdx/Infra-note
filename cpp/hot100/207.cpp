@@ -7,34 +7,30 @@ using namespace std;
 class Solution {
 public:
     bool canFinish(int numCourses, vector<vector<int>>& prerequisites) {
-        vector<int> innode(numCourses, 0);      // 记录入度;
-        vector<vector<int>> g(numCourses, vector<int>{});  // 记录边
-        for(int i = 0; i < prerequisites.size(); ++i){
-            int a = prerequisites[i][0];
-            int b = prerequisites[i][1];
-            innode[a] ++;
-            g[b].push_back(a);
+        vector<int> in(numCourses, 0);
+        vector<vector<int>> out(numCourses, vector<int>());
+        for(auto i : prerequisites){
+            out[i[1]].push_back(i[0]);
+            in[i[0]]++;
         }
 
         queue<int> q;
-        for(int i = 0; i < numCourses; ++i){
-            if(innode[i] == 0){
-                q.push(i);
-            }
+        for (int i = 0; i < numCourses; ++i) {
+            if (in[i] == 0) q.push(i);
         }
 
-        int finish = 0;             // 能退出队列的节点
         while(!q.empty()){
-            ++finish;
             int cur = q.front(); q.pop();
-            for(auto i:g[cur]){
-                --innode[i];
-                if(innode[i] == 0){
-                    q.push(i);
-                }
+            for (auto i : out[cur]) {
+                in[i]--;
+                if(in[i] == 0) q.push(i);
             }
         }
 
-        return finish == numCourses;
+        for(int i = 0; i < numCourses; ++i){
+            if(in[i]) return false;
+        }
+
+        return true;
     }
 };
