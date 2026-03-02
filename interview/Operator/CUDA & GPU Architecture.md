@@ -116,3 +116,11 @@ $$I_{\text{threshold}} = \frac{P_{\text{peak}}}{B_{\text{peak}}}$$
 - **如果 $I < I_{\text{threshold}}$**：该算子理论上受限于显存带宽，是**访存密集型**。
 
 # 7. 知道 bank conflict 吗？常见优化手段有什么？
+bank conflict主要是针对 shm 访存的问题  
+shm 被物理上分为 32 个 bank，然后每个 bank 每次只能服务 32bit/64bit 大小的访问请求  
+如果同一个 warp 里面的不同线程同时访问同一个 bank 的不同地址，那么就会触发 bank conflict，就会让这些访问串行化  
+但如果访问的是同一个地址会触发广播，反而会很高效  
+
+常用的解决方案比如：
+1. padding，在最后一维加上padding（比如+1），让访问 bank 错开，浪费少量 mem，但是改动比较小
+2. swizzle，让线程id和数据分布错开
