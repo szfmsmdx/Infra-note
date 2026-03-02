@@ -3,37 +3,24 @@
 
 using namespace std;
 
+// 非定长版本滑动窗口
+// 逻辑是，内层 while 循环结束后，子串 t 的每种出现次数肯定都小于等于 p 的每种出现次数
+// 此时长度相等说明他们是符合条件的
 class Solution {
 public:
-    bool check(vector<int>a){
-        for(auto i:a){
-            if(i)
-                return false;
-        }
-        return true;
-    }
     vector<int> findAnagrams(string s, string p) {
-        vector<int> h(26, 0);
-        for (auto c:p)
-            h[c - 'a']++;
-
-        int left = 0, right = p.size() - 1;
+        int cnt[26]{0};
+        for (auto c : p) cnt[c - 'a'] ++;
         vector<int> res;
-        if(p.size() > s.size()) return res;
-        for (int i = 0; i <= right; ++i){
-            h[s[i] - 'a']--;
-        }
-
-        while(right < s.size()){
-            if(check(h)){
-                res.push_back(left);
+        int left = 0;
+        for (int right = 0; right < s.size(); ++right){
+            int c = s[right] - 'a';
+            --cnt[c];
+            while(cnt[c] < 0){
+                cnt[s[left++] - 'a']++;
             }
-
-            h[s[left] - 'a']++, left++;
-            ++right;
-            if(right < s.size()) h[s[right] - 'a']--;
+            if(right - left + 1 == p.size()) res.push_back(left);
         }
-
         return res;
     }
 };
