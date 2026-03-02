@@ -115,3 +115,4 @@ $$I_{\text{threshold}} = \frac{P_{\text{peak}}}{B_{\text{peak}}}$$
 - **如果 $I > I_{\text{threshold}}$**：该算子理论上受限于计算能力，是**计算密集型**。
 - **如果 $I < I_{\text{threshold}}$**：该算子理论上受限于显存带宽，是**访存密集型**。
 
+# 7. 知道 bank conflict 吗？常见优化手段有什么？
