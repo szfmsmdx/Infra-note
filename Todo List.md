@@ -5,6 +5,7 @@
 	- [ ] 异步拷贝与流水线（GEMM v5）
 	- [ ] Tensor Core
 	- [ ] CUDA Graph
+	- [ ] bank conflict
 - [ ] CUDA调优
 	- [ ] nsys
 	- [ ] ncu
@@ -28,8 +29,8 @@
 		- [ ] FSDP
 	- [x] 多线程、多进程概念及通信
 - [ ] CPP基础
-	- [ ] 内存管理
-	- [ ] 面相对象
+	- [x] 内存管理
+	- [x] 面相对象
 	- [ ] C++新特性
 		- [ ] cpp11
 		- [ ] cpp14
