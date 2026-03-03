@@ -9,29 +9,27 @@ using namespace std;
 class Solution {
 public:
     string decodeString(string s) {
-        stack<string> st1;
-        stack<int> st2;
+        stack<int> st_num;
+        stack<string> st_string;
         string res = "";
         int num = 0;
-        for(int i = 0; i < s.size(); ++i){
-            if(s[i] >= '0' && s[i] <= '9'){ // 是数字
-                num = num * 10 + (s[i] - '0');
-            }else if(s[i] >= 'a' && s[i] <= 'z' || s[i] >= 'A' && s[i] <= 'Z'){
-                res = res + s[i];
-            }else if(s[i] == '['){
-                st1.push(res), res = "";
-                st2.push(num), num = 0;
+        for(auto c : s){
+            if('0' <= c && c <= '9'){
+                num = num * 10 + (c - 'a');
+            }else if('a' <= c && c <= 'z'){
+                res += c;
+            }else if(c == '['){
+                st_string.push(res); res = "";
+                st_num.push(num); num = 0;
             }else{
-                int times = st2.top();
-                st2.pop();
-                while(times--){
-                    st1.top() += res;
+                int cnt = st_num.top(); st_num.pop();
+                while(cnt --){
+                    st_string.top() += res;
                 }
-                res = st1.top();
-                st1.pop();
+                res = st_string.top();
+                st_string.pop();
             }
         }
-
         return res;
     }
 };
