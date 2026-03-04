@@ -1,47 +1,43 @@
 #include"TreeNode.h"
+#include<sstream>
 #include<string>
-#include<queue>
 using namespace std;
 
+/**
+ * Definition for a binary tree node.
+ * struct TreeNode {
+ *     int val;
+ *     TreeNode *left;
+ *     TreeNode *right;
+ *     TreeNode(int x) : val(x), left(NULL), right(NULL) {}
+ * };
+ */
 class Codec {
 public:
-    string res;
-    void dfs(TreeNode* root){
-        if(!root){
-            res += "n ";
-            return;
-        }
-        res += to_string(root->val); res +=' ';
-        dfs(root->left);
-        dfs(root->right);
-    }
 
-    void dfs(TreeNode* root, int idx, vector<string>& val){
-
-    }
-
+    // Encodes a tree to a single string.
     string serialize(TreeNode* root) {
-        res.clear();
-        dfs(root);
-        return res;
+        if(!root) return "#";
+        return to_string(root->val) + ' ' + serialize(root->left) + ' ' + serialize(root->right);
     }
 
+    TreeNode* dfs(istringstream &s){
+        string tmp;
+        s >> tmp;
+        if(tmp == "#") return nullptr;
+        TreeNode *p = new TreeNode(stoi(tmp));
+        p->left = dfs(s);
+        p->right = dfs(s);
+        return p;
+    }
+
+    // Decodes your encoded data to tree.
     TreeNode* deserialize(string data) {
-        vector<string> val;
-        int i = 0;
-        while (i < data.size()) {
-            int j = i;
-            while(j < data.size() && data[j] != ' ') j++;
-            if(j > i){
-                string s = data.substr(i, j - i);
-                val.push_back(s);
-            }
-            i = j + 1;
-        }
-        if (val.empty() || val[0] == "n") return nullptr;
-        TreeNode *root = new TreeNode(stoi(val[0]));
-        int idx = 0;
-        dfs(root, idx, val);
-        return root;
+        istringstream s(data);
+        return dfs(s);
     }
 };
+
+// Your Codec object will be instantiated and called as such:
+// Codec ser, deser;
+// TreeNode* ans = deser.deserialize(ser.serialize(root));
