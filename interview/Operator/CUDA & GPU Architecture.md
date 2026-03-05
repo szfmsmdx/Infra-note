@@ -1,4 +1,4 @@
-# 1. cu文件从编译到运行的具体过程？
+# cu文件从编译到运行的具体过程？
 
 编译过程
 1. **NVCC 分离编译**：`nvcc` 会将代码拆分。Host 端代码（C++）交给 `g++` 或 `clang`，Device 端代码（`__global__` 函数）由 NVIDIA 编译器处理
@@ -23,7 +23,7 @@
 | **调度 (Schedule)** | GPU Global Scheduler | **Block** | 决定哪个 SM 负责哪个块      |
 | **执行 (Execute)**  | SM Warp Scheduler    | **Warp**  | 真正占用 CUDA Core 的瞬间 |
 
-# 2. 超参数如何设置？（以GridDim和BlockDim为例）
+# 超参数如何设置？（以GridDim和BlockDim为例）
 
 GridDim、BlockDim的设计原则：
 1. warp 对齐（32倍数），如果 block 开的是（10，10），那么需要 10 \* 10 / 32 = 3 ... 4，向上取整需要四个 warp，结果浪费了 32 - 4=28个线程资源
@@ -36,7 +36,7 @@ GridDim、BlockDim的设计原则：
 	1. 推理场景 block 大小为 128 或 256
 	2.  grid 大小应该远大于 SM 数量，保证硬件始终有活干
 
-# 3. GPU 硬件架构？
+# GPU 硬件架构？
 
 | **名词**                | **物理位置**          | **对应 CPU 概念** | **作用与特点**                                                                       |
 | --------------------- | ----------------- | ------------- | ------------------------------------------------------------------------------- |
@@ -46,7 +46,7 @@ GridDim、BlockDim的设计原则：
 | **L2 Cache**          | 所有 SM 共享          | L3 Cache      | 跨 SM 的数据交换中心。比 HBM 快，但比 L1 慢。                                                   |
 | **显存 (DRAM/HBM)**     | GPU 芯片旁边 (PCB板上)  | 内存 (DDR4/5)   | **HBM (High Bandwidth Memory)** 是现代推理显卡的标准（如 A100/H100）。通过硅通孔技术堆叠，提供数 TB/s 的带宽。 |
 
-# 4. Tensor Core初步了解？
+# Tensor Core初步了解？
 
 如何调用？使用 `nvcuda::wmma` 
 与 CUDA Core 的区别：
@@ -61,7 +61,7 @@ GridDim、BlockDim的设计原则：
 - Tensor Core：它通常直接从 **Shared Memory 或特定的寄存器组 (Fragments)** 读取数据。在 `gemm_v5` 中定义的 `a_frag` 实际上就是一种特殊的寄存器映射，专门为了喂给 Tensor Core。
 
 
-# 5. 模型离线 Profile 方法论？
+# 模型离线 Profile 方法论？
 
 ```mermaid
 graph TD
@@ -88,7 +88,7 @@ graph TD
 ```
 
 
-# 6. 如何判断计算密集/访存密集？
+# 如何判断计算密集/访存密集？
 
 ## roofline model
 
@@ -115,7 +115,7 @@ $$I_{\text{threshold}} = \frac{P_{\text{peak}}}{B_{\text{peak}}}$$
 - **如果 $I > I_{\text{threshold}}$**：该算子理论上受限于计算能力，是**计算密集型**。
 - **如果 $I < I_{\text{threshold}}$**：该算子理论上受限于显存带宽，是**访存密集型**。
 
-# 7. 知道 bank conflict 吗？常见优化手段有什么？
+# 知道 bank conflict 吗？常见优化手段有什么？
 bank conflict主要是针对 shm 访存的问题  
 shm 被物理上分为 32 个 bank，然后每个 bank 每次只能服务 32bit/64bit 大小的访问请求  
 如果同一个 warp 里面的不同线程同时访问同一个 bank 的不同地址，那么就会触发 bank conflict，就会让这些访问串行化  
@@ -124,3 +124,9 @@ shm 被物理上分为 32 个 bank，然后每个 bank 每次只能服务 32bit/
 常用的解决方案比如：
 1. padding，在最后一维加上padding（比如+1），让访问 bank 错开，浪费少量 mem，但是改动比较小
 2. swizzle，让线程id和数据分布错开
+
+# 说一下 cuda stream
+
+# 知道 cuda runtime吗？说一下 cuda driver、cuda runtime等
+
+# 说一下 SIMD 和 SIMT
