@@ -126,7 +126,25 @@ shm 被物理上分为 32 个 bank，然后每个 bank 每次只能服务 32bit/
 2. swizzle，让线程id和数据分布错开
 
 # 说一下 cuda stream
+我理解cuda stream实际上硬件发展的结果，最早是一个 kernel 占满 GPU，其他同步排队，后来硬件支持了并发内核执行，提出了 stream 的概念，GPU 的调度器维护一些任务队列，GPU调度器在调度的时候只要资源不冲突就可以同时并行
+
+用 cuda stream 的话：
+- 计算和通信的 overlap 去并行执行，一边算一边传
+- 也可以对一些小 kernel 去并行执行
+
+我自己项目实现还是 torch 层面封装好的接口，没用 cuda 层面的接口
 
 # 知道 cuda runtime吗？说一下 cuda driver、cuda runtime等
+这是一个从高到低的调用：
+- torch
+- cuda runtime api
+- cuda driver
+- nv kernel、Linux kernel
+- GPU 硬件工作
+
+自己写的 cuda kernel是hardware层面的，因为他要被 nvcc 翻译成 ptx 和 sass 机器码让机器运行
 
 # 说一下 SIMD 和 SIMT
+SIMD 是“一条指令同时处理多个数据元素”（显式向量化），而 SIMT 是“一条指令同时驱动多个线程”（隐式向量化，每个线程以为自己在全量执行）。
+- SIMD：单指令，多数据
+- SIMT：单指令，多线程

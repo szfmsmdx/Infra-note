@@ -46,14 +46,39 @@
 3. 算子融合和内存复用：比如 rms norm和后续的FFN可以融合，否则你要先写，写完了在读在计算
 
 # 实际过程中为什么 GPU 调度比 CPU 更加不平衡？
+- GPU启动的kernel是非抢占式的要等运行完，所以会出现一些负载倾斜的问题
+- CPU控制权在OS kernel，内核有全局视野，但是GPU控制权在用户态框架上面，需要自己设计一些调度策略，以及GPU上下文切换的成本比较高，所以倾斜于少切换，最终导致长任务对资源垄断
 
 # 以 EP 为背景 prefill 和 decode 各自应该选用 EP16 还是 EP8，原因呢？
+- prefill应该是EP8，因为 prefill 是 compute-bound，少EP可以减少通信成本，降低TTFT
+- decode那就采用 EP16 去减轻内存吞吐的压力，提升 TBT/TPOT
 
 # 如何根据 prefill 和 decode 确定最大的 batch size？
 
 # 业务上如果 ttft 没有满足，那么应该怎么解决？
+先考虑是不是prefill算力不够，先增加P节点
+
 ## 哪怕增加了 P 节点也没有用怎么办
+首先的话，那应该就不是算力的问题，可能的原因有：
+- 被长序列给阻塞了，可以采取 chunk prefill 优化短 seq 的 TTFT，或者采取其他一些调度策略
+- 通信问题，all2all 或者 nccl 阻塞
+  - 可能是 EP 的某个节点卡了，那么可以试试减少 EP，减少通信成本
 
 # prompt 分多个 chunk，顺序有要求吗？
+会的，因为Attention计算是自回归的，需要依赖之前的信息，如果打散的话，那么可能会读到不应该被读到的token
 
 # 算子调优思路？
+- nsys：看 Kernel 在时间轴上的分布、启动延迟、CPU-GPU 同步点、PCIe 拷贝耗时。用来判断是不是“排队”或“启动”慢了
+- ncu：看寄存器使用率、Shared Memory 冲突、Tensor Core 利用率、DRAM 吞吐量
+
+主要关注指标：
+- DRAM Throughput (GB/s)：实际显存带宽占用。
+- Compute Throughput (TFLOPS)：实际算力占用（区分 FP16/INT8 Tensor Core）。
+- Memory Throughput / Compute Throughput ：相对于硬件理论峰值的百分比。
+- Stall Reasons：比如 memory_throttle (显存堵了), sync_dependency (等数据), dispatch_stall (没喂饱)。
+- Occupancy (活跃线程束占比)：是否填满了 SM。
+
+然后可以看 ncu 中的 roofline，看自己算子的位置：
+- 处在左侧倾斜部分，那么是 mem-bound，要考虑 mem 层面的优化，比如 shm、算子融合、量化等操作，主要是提高访存效率，要么少读，要么读了多复用
+- 处在右侧那么是 compute-bound，那么考虑 tensor-core 使用或者其他一些方法
+- 如果里两个 wall 都很远的话，可能是 launch 开销比较大，也可能是里面一些分支判断比较多，可以考虑用 mask 什么的
