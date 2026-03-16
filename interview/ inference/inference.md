@@ -83,3 +83,14 @@
 - 处在右侧那么是 compute-bound，那么考虑 tensor-core 使用或者其他一些方法
 - 如果里两个 wall 都很远的话，可能是 launch 开销比较大，也可能是里面一些分支判断比较多，可以考虑用 mask 什么的
 
+# 说一下 FlashAttention？
+首先说一下 FlashAttention 动机，对于 Attention 计算，我们要先算出 score matrix 再写到 HBM，然后做 softmax，读出来写回去，最后乘上 V，大量的 HBM 读写导致实际是 mem-bound
+flashAttn 干的事是 tile 分块，在 SRAM / shm / register 里面做 online softmax 和局部累加，把中间结果尽量留到片上，最后写会必要的输出
+
+所以他的技术点在于：
+1. tile
+2. online softmax
+3. fuse，把QK、softmax，PV fuse为一个kernel
+
+真正大头的 dense matmul 部分，尤其是 $QK^T$  和后面的 $P\times V$ ，如果数据类型和 tile 形状合适，通常优先走 Tensor Core；而 softmax、mask、scale、max/sum reduction、index 计算、边界处理、online normalization 这些标量或 reduction 逻辑，更多是在 CUDA core 上做。也就是说，Tensor Core 负责“高吞吐矩阵乘”，CUDA core 负责“控制流、规约、逐元素、搬运协同”
+
