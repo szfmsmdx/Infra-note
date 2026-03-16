@@ -28,7 +28,21 @@ using namespace std;
 
 class Solution {
 public:
+    unordered_map<long long, int> h;
+    int res;
+    void dfs(TreeNode* root, int targetSum, long long cur){
+        if(!root) return ;
+        cur += root->val;
+        if(h.count(cur - targetSum)) res += h[cur - targetSum];
+        h[cur]++;
+        dfs(root->left, targetSum, cur);
+        dfs(root->right, targetSum, cur);
+        h[cur]--;
+
+    }
     int pathSum(TreeNode* root, int targetSum) {
-        
+        h[0] = 1;
+        dfs(root, targetSum, 0);
+        return res;
     }
 };
