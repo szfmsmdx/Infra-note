@@ -252,6 +252,7 @@ MHA 和 MQA 的折中版本，也是目前工业界主流方法
 > DeepSeek 提出，不是简单共享 KV，而是把 KV 投影到一个低维空间再重建
 > 参考了这篇文章：[(25 封私信 / 78 条消息) 【attention1】MHA、MQA、GQA和MLA - 知乎](https://zhuanlan.zhihu.com/p/21151178690)、[(25 封私信 / 78 条消息) 【LLM进阶系列】DeepSeek MLA 公式详细推导+代码实现 - 知乎](https://zhuanlan.zhihu.com/p/21817182991)
 > [(6 封私信 / 19 条消息) 带你从头发明MLA - 知乎](https://zhuanlan.zhihu.com/p/1911795330434986569)
+> [(5 封私信) 超细图解MLA计算流&吸收矩阵对比分析 - 知乎](https://zhuanlan.zhihu.com/p/1948769945132470860)
 
 效果：
 - 推理效果相当
@@ -268,6 +269,7 @@ MHA 和 MQA 的折中版本，也是目前工业界主流方法
 
 #### MLA推导
 > 推导可以参考这篇文章：[(6 封私信 / 19 条消息) 带你从头发明MLA - 知乎](https://zhuanlan.zhihu.com/p/1911795330434986569)
+> [(5 封私信) 超细图解MLA计算流&吸收矩阵对比分析 - 知乎](https://zhuanlan.zhihu.com/p/1948769945132470860)
 > 可能会用的结论：(m,k) * (k,n) 计算量为 2mnk
 
 $o = \mathrm{softmax}(\underbrace{x^{\top}W_{q}W_{k}^{\top}}_{q' \in \mathbb{R}^{1\times d}} \underbrace{X}_{k'^\top \in \mathbb{R}^{d\times N}}) \underbrace{X^\top}_{v' \in \mathbb{R}^{N\times d}} W_{v}W_{o}$ 
@@ -316,5 +318,13 @@ NSA 可以参考：
 
 #### DSA
 [(5 封私信) 【手撕 DSA】 DeepSeek-V3.2 的 Sparse Attention 比 NSA 好在哪？ - 知乎](https://zhuanlan.zhihu.com/p/1957032283270812718)
+
+首先先看一下 DSA的基本骨架，我们知道 MLA 只是解决了 kv cache 存储的问题，但是在 attn 计算过程（qk^T + sv，其中 s 代表 softmax），实际上他并没有减少计算量，因为他会做低秩到原维度的一个投影，所以 NSA 和 DSA 都是为了进一步去解决这个计算量的问题
+
+![[DSA Structure.png]]
+
+![[DSA 计算流.png]]
+
+
 
 ## Linear Attention
