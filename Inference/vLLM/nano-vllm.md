@@ -180,6 +180,62 @@ Runner 主要干三件事：
 - 初始化子进程，初始化通信 group
 - 读取模型，进行张量分割实现 tp 并行
 - 预分配 kvcache，通过一次 warmup 来试探可以系统可以分配多少显存
+
+##### 分配 kv cache
+简单说一下这里分配 kv cache 的逻辑，先看代码：
+```python
+def allocate_kv_cache(self):
+	"""
+	分配当前Runner所处device的kvcache
+	"""
+	config = self.config
+	hf_config = config.hf_config
+	free, total = torch.cuda.mem_get_info()
+	used = total - free
+	# 获取当前的device
+	peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+	current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+	# self.world_size = config.tensor_parallel_size 有几块 GPU
+	# hf_config.num_key_value_heads : 有多少个头
+	# num_kv_heads 每个卡负责多少个 kv heads
+	num_kv_heads = hf_config.num_key_value_heads // self.world_size # 一共的 kv head 个数 / 总 GPU 数量，代表当前显卡需要开辟多少个头的数量
+	head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+
+	# 计算一个 block 存放的大小
+	# block_bytes = kv(2) * 层数 * 一个block放多少 token * 多少 kv 头 * 头维度 * 每个维度的数据大小
+	block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+	# 计算当前 GPU 需要挂载的 kvcache block
+	config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+	assert config.num_kvcache_blocks > 0
+	# 直接占满，这里不用手动指定 dtype 的原因是，在函数调用的外部上下文已经手动做了这个操作了
+	self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
+	layer_id = 0
+	for module in self.model.modules():
+		if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
+			module.k_cache = self.kv_cache[0, layer_id]
+			module.v_cache = self.kv_cache[1, layer_id]
+			layer_id += 1
+
+```
+
+对 block 的分配逻辑看注释已经写的比较清楚了，重点看一下计算可分配显存吧：
+- 这里 peak 、current 都是从驱动的当前进程中拿的，也就是为当前用户分配的 peak mem 和 current mem
+- 但是 total 和 used 是从驱动拿的，它关注的是这张卡的所有进程和总分配HBM
+
+所以其实构造是这样的：
+- 对卡来说，我们只能用 total * config.gpu_memory_utilization 这么多的显存，剩下一部分防止 OOM 或者作为 reserve HBM 保留
+- 下面我们开始找这个进程能分配的最多显存，所以我们要先把卡上其他用户的 HBM 删除，这个是 other = used - current
+- 最后这张卡只剩我们自己的显存了，这时候我们已经拿到了计算时的 peak mem，那么只要保留 peak mem保证卡能够正常进行，其实剩下的都作为 kv cache 其实都可以
+- 所以最后的计算公式为： total * config.gpu_memory_utilization - other- peak，展开 other 也就是代码里的公式
+
+最后再说下，其实这里 block 就对应的 seq_len，什么意思呢？在不考虑一个 seq 的 max_len 参数下，一个 seq 能够得到的最多有多少长度 token 的支持
+
+实际上也是一样，我们顺着推，假设现在的 kv cache 已经分配好是 n GB吧
+- 首先我们要算一个 token 的 byte(B)，一个 token 假设用 fp16 去存，那么一个 token 其实是占 head_dim * 16 bit / 8bit = 2Byte，假设最大长度为 seq_len 的话，那么一个 seq 占用了 head_dim * seq_len * 2B
+- 再来考虑结构，每个 head 要存自己的 kv cache，那么对于一层来讲，通常我们考虑成这个 Layer 只有一个 attn 组件吧，那么就是 head_num 个 head，现在也就是 head_dim * seq_len * 4 * head_num，这里是 4 而不是 2 是因为要同时存 k 和 v
+- 当然我们还需要考虑 layer_num 也就是 layer_num * hidden_dim * seq_len * head_dim * 4B
+- 最后让他等于 n 就可以算出来（如果做了 TP 的话，那么再除以 world_size 即可）
+
 #### Scheduler
 然后就是 scheduler 调度器的初始化
 

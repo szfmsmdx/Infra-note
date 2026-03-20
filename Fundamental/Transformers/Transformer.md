@@ -198,6 +198,7 @@ $q^\top R(\Delta) k = (q_1k_1 + q_2k_2)\cos(\Delta\theta) + (q_2k_1 - q_1k_2)\si
 更进一步的外推讨论参考：[[长度外推]]
 
 # Attention
+
 ## 几种 Attention 对比
 目前主要的 Attention 主要有：
 - MHA（Multi Head Attention）
@@ -250,7 +251,70 @@ MHA 和 MQA 的折中版本，也是目前工业界主流方法
 ### MLA
 > DeepSeek 提出，不是简单共享 KV，而是把 KV 投影到一个低维空间再重建
 > 参考了这篇文章：[(25 封私信 / 78 条消息) 【attention1】MHA、MQA、GQA和MLA - 知乎](https://zhuanlan.zhihu.com/p/21151178690)、[(25 封私信 / 78 条消息) 【LLM进阶系列】DeepSeek MLA 公式详细推导+代码实现 - 知乎](https://zhuanlan.zhihu.com/p/21817182991)
+> [(6 封私信 / 19 条消息) 带你从头发明MLA - 知乎](https://zhuanlan.zhihu.com/p/1911795330434986569)
 
 效果：
 - 推理效果相当
 - kv cache大幅下降
+
+![[MLA计算公式.png]]
+
+首先约定一下一些维度：
+- $d_c$ ：MLA低秩压缩的维度，论文中取值： $d_c = 4 \times d_h$ 
+- $d_h$ ：单个 head 维度
+- $n_d$ ：每层 head 个数
+- $d$ ：隐藏层维度
+- $W^{DKV} \in R^{d_c * d}$ ：低秩变换矩阵
+
+#### MLA推导
+> 推导可以参考这篇文章：[(6 封私信 / 19 条消息) 带你从头发明MLA - 知乎](https://zhuanlan.zhihu.com/p/1911795330434986569)
+> 可能会用的结论：(m,k) * (k,n) 计算量为 2mnk
+
+$o = \mathrm{softmax}(\underbrace{x^{\top}W_{q}W_{k}^{\top}}_{q' \in \mathbb{R}^{1\times d}} \underbrace{X}_{k'^\top \in \mathbb{R}^{d\times N}}) \underbrace{X^\top}_{v' \in \mathbb{R}^{N\times d}} W_{v}W_{o}$ 
+这个式子看起来比较明白，这其实就是 MLA 的出发点：
+- 对原始式来看，不含 kv cache 的计算量大概是 $O(N^2\cdot d)$ 这大小的计算量，加了 kv cache 能将计算量降低到 $O(N)$  级别
+	- 但是加入 kv cache 存在几个问题：
+		- kv cache占用太大了，导致 decoding 变成 mem bound
+		- 计算量下降太快导致 decoding 的计算强度跟不上，如果加 batch 一方面 kv 存储会爆另一方面又回到第一点了
+- 不过我们重新考虑计算顺序其实发现，kv 的存储只需要 X 即可
+
+$\begin{cases} q = x^\top W_q \\ k = X^\top W_k \\ v = X^\top W_v \end{cases} \implies \begin{cases} q' = x^\top W_q W_k^\top \\ k' = X^\top \\ v' = X^\top \end{cases}$ 
+
+但其实这种做法极大增加了计算量，调换顺序让 Attention 计算量大了很多倍
+
+我们可以简单计算出，使用 kv cache 每个头的计算量和kv cache缓存量为：
+- 计算量：$\underbrace{3 \times d \times d_h}_{\text{计算 } q,k,v} + \underbrace{1 \times d_h \times N}_{qk^\top} + \underbrace{1 \times N \times d_h}_{sv} + \underbrace{1 \times d_h \times d}_{\text{计算 } o} = 4dd_h + 2Nd_h$  
+- 缓存量：$2\times h_c \times N \times d_h$ 
+
+当我们采用 X-cache 来存，那么对应的计算量和缓存量为：
+- 计算量：$\underbrace{1 \times d \times d_h}_{\text{计算 } q} + \underbrace{1 \times d_h \times d}_{q \times W^\top} + \underbrace{1 \times d \times N}_{qk^\top} + \underbrace{1 \times N \times d}_{sv} + \underbrace{1 \times d \times d_h}_{W_v} + \underbrace{1 \times d_h \times d}_{\text{计算 } o} = 4dd_h + 2Nd$ 
+- 缓存量：$N\times d$ 
+
+>注：
+>对于 Attn 的主体部分： qk + sv，可以看到计算量变化为： $1\times d_h\times N + 1\times N \times d_h$ -> $1\times d\times N + 1\times N\times d$ ，他实际上增加了 attn 主体的计算量
+
+所以：
+- 缓存变化：一般来说从模型结构看 $d_c \times d_h > d$ ，所以我们可以保底获得 2 倍左右的 cache 压缩，以 dpsk 模型结构来看大概能获得 5 倍左右的压缩
+- 从计算来看，数量级上增加了 $2\times N(d-d_h)$  这么多的计算量，但实际上 d 是 d_h 的非常多倍，以 dpsk为例，d=7168，d_h=128，数量级上可能差了 50 倍
+- 结论：我们用 50 倍的计算换取了5倍的空间，实际上这是不太对等的，但是 MLA 用低秩的思想解决了这个问题
+
+MLA 流程如下：
+![[dpsk MLA.png]]
+
+到此我们就推导出了MLA，可以看到他的本质非常简单，在最原始的MHA的基础上做两步变动：
+1. 不做KV Cache，而是Cache 更小的输入  ，这样整个计算量会增大几十倍，但cache会减小4-5倍，似乎有点不太划算。
+2. 把每一层的  在计算和缓存前，做简单的降维，将上面几十倍的计算量增大降低到几倍，且将cache减小比例增加到60多倍，这样就比较划算了。
+
+至于为什么可以给X降维，这个作者也没有合理解释，问就是实验结果显示可以。
+
+### DSA
+#### NSA
+NSA 可以参考：
+- [一文通透Native Sparse Attention(简称NSA)——动态分层下的“原生稀疏注意力”策略：将粗粒度的token压缩与细粒度的token选择相结合_tokenselectattention-CSDN博客](https://blog.csdn.net/v_JULY_v/article/details/152379344)
+- [(5 封私信 / 2 条消息) 【手撕NSA】DeepSeek新作-原生稀疏注意力-超长文(附代码) - 知乎](https://zhuanlan.zhihu.com/p/24841366485)
+这两篇文章大概说清楚了 NSA 在干什么，主要就是通过 cmp 压缩全局注意力信息，获取全局信息，再通过全局信息筛选比较重要的 kv，获得局部信息，最后滑窗 Attn 计算出关联紧密信息，这三者通过 gate 门控拿到一个相对比例最后得到最终的结果
+
+#### DSA
+[(5 封私信) 【手撕 DSA】 DeepSeek-V3.2 的 Sparse Attention 比 NSA 好在哪？ - 知乎](https://zhuanlan.zhihu.com/p/1957032283270812718)
+
+## Linear Attention
