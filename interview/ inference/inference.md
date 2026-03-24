@@ -94,3 +94,7 @@ flashAttn 干的事是 tile 分块，在 SRAM / shm / register 里面做 online 
 
 真正大头的 dense matmul 部分，尤其是 $QK^T$  和后面的 $P\times V$ ，如果数据类型和 tile 形状合适，通常优先走 Tensor Core；而 softmax、mask、scale、max/sum reduction、index 计算、边界处理、online normalization 这些标量或 reduction 逻辑，更多是在 CUDA core 上做。也就是说，Tensor Core 负责“高吞吐矩阵乘”，CUDA core 负责“控制流、规约、逐元素、搬运协同”
 
+- v1提出
+- v2优化并行策略，解决 v1 在长序列下的性能瓶颈
+- v3支持Hopper架构和FP8格式
+- v4适配Blackwell架构，适配FP4
