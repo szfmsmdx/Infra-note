@@ -186,6 +186,9 @@ if __name__ == "__main__":
 | `dist.barrier()`                                 | 无                                                        | **同步点**：所有 rank 在此阻塞，直到全部到达（调试/阶段对齐用）                                |
 
 # DP
+>参考文章：
+>[(5 封私信 / 2 条消息) 图解大模型训练之：数据并行上篇(DP, DDP与ZeRO) - 知乎](https://zhuanlan.zhihu.com/p/617133971)
+>[(5 封私信 / 2 条消息) 图解大模型训练之：数据并行下篇( DeepSpeed ZeRO，零冗余优化) - 知乎](https://zhuanlan.zhihu.com/p/618865052)
 
 DP的工作流如下：
 1. 主设备（通常是 cuda:0）持有原始模型副本
