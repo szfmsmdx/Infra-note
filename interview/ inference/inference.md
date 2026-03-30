@@ -11,7 +11,7 @@
 举个例子比如 prefill 是超长文本 100K+，那么 cuda graph 要开到 100K+，但这样的超长序列一方面开销太大，另一方面为了少量请求单开收益太低
 
 ## prefill 能不能用？
-其实也是可以用的，一种可行的方案是分段构造 cuda graph，比如我们对 FFN 采取 cuda graph，Attention 保持 eager  
+其实也是可以用的，一种可行的方案是分段构造 cuda graph，比如我们对 FFN 采取 cuda graph，Attention 保持 eager
 现有的框架 vllm 已经支持 prefill 阶段的 cuda graph 了，采用的是 PIECEWISE。其运行逻辑是：在Attention或其他不支持CUDA Graph的操作中保持eager模式，而其余所有操作则被纳入CUDA Graph中执行。
 
 # chunk prefill 有什么弊端？
