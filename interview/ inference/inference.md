@@ -84,6 +84,10 @@
 - 如果里两个 wall 都很远的话，可能是 launch 开销比较大，也可能是里面一些分支判断比较多，可以考虑用 mask 什么的
 
 # 说一下 FlashAttention？
+参考：[[Transformer#FlashAttn]]
+#### online softmax
+
+
 首先说一下 FlashAttention 动机，对于 Attention 计算，我们要先算出 score matrix 再写到 HBM，然后做 softmax，读出来写回去，最后乘上 V，大量的 HBM 读写导致实际是 mem-bound
 flashAttn 干的事是 tile 分块，在 SRAM / shm / register 里面做 online softmax 和局部累加，把中间结果尽量留到片上，最后写会必要的输出
 

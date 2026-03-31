@@ -301,7 +301,7 @@ $\begin{cases} q = x^\top W_q \\ k = X^\top W_k \\ v = X^\top W_v \end{cases} \i
 - 结论：我们用 50 倍的计算换取了5倍的空间，实际上这是不太对等的，但是 MLA 用低秩的思想解决了这个问题
 
 MLA 流程如下：
-![[dpsk MLA.png]]
+![[dpsk MLA.png|327]]
 
 到此我们就推导出了MLA，可以看到他的本质非常简单，在最原始的MHA的基础上做两步变动：
 1. 不做KV Cache，而是Cache 更小的输入  ，这样整个计算量会增大几十倍，但cache会减小4-5倍，似乎有点不太划算。
@@ -326,5 +326,48 @@ NSA 可以参考：
 ![[DSA 计算流.png]]
 
 
-
 ## Linear Attention
+
+
+## FlashAttn
+### online softmax
+首先说一下 online softmax 的动机实际上也是减少访存（safe softmax 是数值稳定性）
+所以，对 naive softmax，实际上应该是 2 pass，就是先拿到每个 exp(x_i)，求和得到分母 sum(exp(x_i))，第二个 pass 拿到 exp(x_i) 然后做商写进原数组，所以是 2 load + 1 store
+
+加上 safe softmax 那么就变成了 3 pass，第一个 pass 拿到最大值，后面两个 pass 是一样的
+
+online softmax 是在 safe naive softmax 的基础上进行了访存的优化，利用指数运算规则采取一种类似动态规划的想法：
+- 1 pass：动态更新 max 值和部分和 sum
+- 2 pass：计算每个元素的 exp(x_i - max) / sum 然后 store
+将 3 load + 1 store -> 优化为 2 load + 1 store
+
+实际上为什么 online softmax 会有效呢？本质上还是 safe softmax 这个算子是 memory-bound 的
+
+### flash attn v1
+我们首先拿到 attn 计算公式：
+$$
+O = \mathrm{softmax}(QK^T/\sqrt{d})V
+$$
+flashattn 的主要想法就是优化这里面的访存，因为 softmax 算子是一个 memory-bound 算子，flash attn 的出发点是 kernel fuse 为一个大 kernel，这里计算量是优化不了的（除非 linear attn 优化为 O(N)），所以出发点就成了优化 softmax 算子。具体做法为：
+1. 确定分块大小：
+	1. 对 KV 块： $B_c=[\frac M {4d}]$ 向上取整，M 是片上 SRAM 大小，需要同时存放 QKV 和输出O所以除以 4d
+	2. 对 Q： $B_r = \min([\frac M {4d}], d)$ 同样是向上取整，这样保证分块后的 Q_i 在计算的时候能够存放中间结果 $S_{ij}$ （softmax 结果）
+2. 预留 O 输出结果空间
+3. （step 3-4）分块，$T_c$ 是 KV 的分块数量、$T_r$ 是 Q 的分块数量同时也是 O、l、m 的分块数量
+4. （step 5-15）双循环计算
+	1. 内循环：$Q_1 \rightarrow Q_{T_r}$ ：每次加载一块 Q，对应的 $K_i、V_i$  不变
+	2. 外循环：$K_1、V_1 \rightarrow K_i、V_i$ ，加载新的 KV，遍历 Q 进行计算
+![[flashattn v1计算循环示意图.png|634]]
+
+这里也可以看到和 naive attn 比，内存从 $O(N^2)$  降到了 $O(N)$ 的大小，因为你不需要去存 $O(N^2)$ 的 $QK^T$ 这个中间矩阵了，只开了 O(N) 的 O 的大小，这是以算缓存，我们可以发现，虽然外循环的 KV 只存取了一次，但是你 Q 是要被反复读取的，所以这里计算量会大一点
+
+### flash attn v2
+承接上文，v2 的想法就是去优化引入的额外计算量
+手打公式比较麻烦， 参考这篇博客：[(5 封私信) FlashAttention2详解（性能比FlashAttention提升200%） - 知乎](https://zhuanlan.zhihu.com/p/645376942)
+
+简单点说是把计算顺序改了，之前是要维护softmax的分母现在不用了，现在的循环就是一个纯粹的分块 GEMM + exp 的操作，然后含有 reduce 取 max 的规约的想法。另外还有一个点是他外循环改成了 Q，内循环改成了 KV
+
+v2 要重点关注一下 GPU 内部的工作逻辑，看一下 warp 具体的计算顺序，在一个attention计算块内，将工作分配在一个thread block的不同warp上，以减少通信和共享内存读/写。
+
+### v3 && v4
+v3 是针对 Hopper 架构、v4 是针对 BlackWell 架构的
